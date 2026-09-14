@@ -1,0 +1,30 @@
+# Claspt
+
+> Memory and encrypted credentials for AI agents, in a vault the user owns. A local, markdown-native vault (notes with AES-256-GCM secret blocks) that exposes memory and secrets to agents over MCP, a loopback HTTP API, a CLI and SDKs, behind named client tokens, approvals, a rate limit and an access log. Source-available under the PolyForm Shield License 1.0.0 (not open source).
+
+Claspt runs as a desktop app (macOS, Windows, Linux) with a browser extension (Chrome family, Firefox) and a headless mode (`claspt serve`). Agents keep per-project memory (kinds, validity, staleness, search, review) and use credentials without seeing them (`claspt://secret` references, `claspt run`, browser "log me in", an SSH agent, passkeys).
+
+## Start here
+
+- [README](README.md): what it is and what is in the repository
+- [Quickstart: Claude Code](docs/quickstarts/claude-code.md)
+- [Quickstart: Cursor](docs/quickstarts/cursor.md)
+- [Quickstart: Windsurf](docs/quickstarts/windsurf.md)
+- [Quickstart: Codex CLI](docs/quickstarts/codex.md)
+- [Quickstart: Python SDK](docs/quickstarts/python-sdk.md)
+- [Quickstart: TypeScript SDK](docs/quickstarts/typescript-sdk.md)
+- [Quickstart: claspt serve](docs/quickstarts/claspt-serve.md)
+
+## Reference
+
+- [MCP reference](docs/mcp/reference.md): every tool, resource and prompt
+- [Local API and integrations](docs/design/local-api-and-integrations.md)
+- [Agent memory and access control](docs/design/agent-memory-and-access-control.md): the design of record for tokens, approvals, memory, secret channels, SSH agent, passkeys, headless
+- [Policy file example](docs/examples/policy.toml)
+- [Threat model](docs/threat-model.md)
+- [Security policy](SECURITY.md)
+
+## Licence and contributing
+
+- [LICENSE](LICENSE): PolyForm Shield 1.0.0. Read, build, audit; do not ship a competing product from it.
+- [CONTRIBUTING](CONTRIBUTING.md) and [CLA](CLA.md)

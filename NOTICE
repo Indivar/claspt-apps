@@ -1,0 +1,14 @@
+Claspt
+Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
+
+The desktop application, browser extension, shared TypeScript package and the
+claspt-core crate (excluding its sync module) are published source-available
+under the PolyForm Shield License 1.0.0 (see LICENSE).
+
+The mobile applications, the sync and licence server, the sync client and the
+sharing feature are proprietary and confidential, all rights reserved, and are
+not part of the published source. Every source file states which of the two
+applies to it in its header.
+
+"Claspt" and the Claspt logo are trademarks of Indivar Software Solutions
+Limited. The licence above does not grant any right to use them.

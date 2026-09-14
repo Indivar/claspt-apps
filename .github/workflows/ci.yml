@@ -1,0 +1,117 @@
+name: CI
+
+# Quality gates for the desktop app. Runs on every push and pull request.
+# Keeps formatting, lint, type-checks, clippy, and tests green in the public repo.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gitleaks
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+      - name: Scan the tree
+        # The working tree, not the history: the history is scrubbed in a
+        # separate, owner-authorised step (docs/specs/release-3.3-plan.md,
+        # phase 8), after which this becomes `gitleaks git`.
+        run: ./gitleaks dir . --config .gitleaks.toml --redact --exit-code 1
+
+  frontend:
+    name: Frontend (lint · types · format · tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Copyright headers
+        run: npm run headers:check
+      - name: Prettier
+        run: npm run format:check
+      - name: ESLint
+        run: npm run lint
+      - name: Type-check
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+
+  rust:
+    name: Rust (fmt · clippy · tests)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt -p claspt -p claspt-core --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy -p claspt -p claspt-core --all-targets -- -D warnings
+      - name: Tests
+        run: |
+          cargo test -p claspt-core --lib
+          cargo test -p claspt --lib
+
+  sdks:
+    name: SDKs (Python and TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Python SDK tests
+        working-directory: sdks/python
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: TypeScript SDK typecheck, tests and build
+        working-directory: sdks/typescript
+        run: |
+          ../../node_modules/.bin/tsc -p tsconfig.json --noEmit
+          ../../node_modules/.bin/vitest run
+          ../../node_modules/.bin/tsc -p tsconfig.json
+
+  rust-windows:
+    name: Rust on Windows (tests)
+    # The owner-only file permission code has a Windows implementation that
+    # only runs on Windows (crates/claspt-core/src/fs_perms.rs). Linux CI
+    # cannot exercise it, and a security control with no test on the platform
+    # it protects is not a control.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: |
+          cargo test -p claspt-core --lib
+          cargo test -p claspt --lib
+

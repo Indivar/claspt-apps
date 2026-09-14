@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Build artifacts — never commit packaged extension zips
+*.zip

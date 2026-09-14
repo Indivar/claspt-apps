@@ -1,0 +1,41 @@
+{
+  "name": "claspt-browser-extension",
+  "version": "2.6.2",
+  "license": "PolyForm-Shield-1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run build:all -- --watch",
+    "build": "npm run build:all",
+    "build:all": "npm run build:pages && npm run build:background && npm run build:content && npm run build:passkeys",
+    "build:passkeys": "vite build --config vite.passkey-bridge.config.ts && vite build --config vite.passkey-provider.config.ts",
+    "build:pages": "vite build",
+    "build:background": "vite build --config vite.background.config.ts",
+    "build:content": "vite build --config vite.content.config.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "package": "npm run build && rm -f claspt-extension-$npm_package_version.zip && (cd dist && zip -r -q ../claspt-extension-$npm_package_version.zip . -x '**/*.map') && ls -lh claspt-extension-$npm_package_version.zip",
+    "package:firefox": "npm run build && node scripts/firefox-manifest.mjs --write && rm -f claspt-extension-firefox-$npm_package_version.zip && (cd dist && zip -r -q ../claspt-extension-firefox-$npm_package_version.zip . -x '**/*.map') && ls -lh claspt-extension-firefox-$npm_package_version.zip",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "psl:update": "node scripts/generate-psl.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/chrome": "^0.0.287",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "jsdom": "^28.1.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vitest": "^4.0.18"
+  }
+}

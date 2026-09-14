@@ -1,0 +1,9 @@
+{
+  "name": "@claspt/shared",
+  "version": "0.13.9",
+  "license": "PolyForm-Shield-1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

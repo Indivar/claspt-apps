@@ -1,0 +1,133 @@
+[package]
+name = "claspt"
+version = "3.3.32"
+description = "Cross-platform personal notes vault with encrypted secret storage"
+authors = ["Indivar Software Solutions Limited"]
+license = "PolyForm-Shield-1.0.0"
+homepage = "https://claspt.app"
+repository = "https://github.com/Indivar/claspt-apps"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "claspt_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.4", features = [] }
+serde_json = "1.0"
+
+[dependencies]
+toml = "0.8"
+regex = "1"
+fs4 = { version = "0.8", features = ["sync"] }
+gethostname = "1"
+claspt-core = { path = "../crates/claspt-core" }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.10.0", features = ["tray-icon", "devtools"] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+thiserror = "2"
+
+# Crypto
+ring = "0.17"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Image processing
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+# Pages
+strsim = "0.11"
+serde_yaml = "0.9"
+uuid = { version = "1", features = ["v4"] }
+slug = "0.1"
+trash = "5"
+walkdir = "2"
+
+# Search
+tantivy = "0.22"
+
+# Git
+git2 = "0.20"
+openssl = { version = "0.10", features = ["vendored"] }
+tempfile = "3"
+
+# Export
+zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
+
+# Import
+csv = "1"
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# HTTP client (license online check, future cloud APIs)
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "blocking", "multipart", "stream"], default-features = false }
+urlencoding = "2"
+
+# Google Drive OAuth
+tiny_http = "0.12"
+open = "5"
+
+# Local HTTP API
+axum = "0.8"
+
+# CLI / MCP
+clap = { version = "4", features = ["derive"] }
+# Passkeys (WebAuthn authenticator)
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+# SSH agent
+ssh-key = { version = "0.6", default-features = false, features = ["std", "alloc", "ed25519", "rsa", "p256", "p384", "encryption"] }
+ssh-encoding = "0.2"
+signature = "2"
+rsa = { version = "0.9", default-features = false, features = ["sha2"] }
+sha2 = { version = "0.10", features = ["oid"] }
+
+# Async / WebSocket (Sync V2)
+tokio = { version = "1", features = ["sync", "time", "macros", "net", "rt", "signal"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+url = "2"
+
+# File watching (inbox)
+notify = "7"
+
+# System
+dirs = "6"
+tauri-plugin-single-instance = "2.4.0"
+
+# Biometric / Keychain
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# Auto-updater (excluded in store builds — store apps update through the store)
+tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-process = "2"
+hex = "0.4.3"
+tauri-plugin-opener = "2.5.3"
+tauri-plugin-clipboard-manager = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAError", "block2"] }
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSError", "NSString"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Security_Credentials_UI", "Foundation"] }
+
+[features]
+default = ["updater"]
+updater = ["dep:tauri-plugin-updater"]
+# The commercial modules: sync, sharing and the licence system. The public,
+# source-available tree does not contain them; it builds with this feature
+# off and the stubs in src/pro_stubs stand in for the few types the rest of
+# the app touches. The export in scripts/export-public.mjs turns it off.
+pro = ["claspt-core/pro"]
+store = []  # Disables updater; for Mac App Store and Microsoft Store builds
+
+[dev-dependencies]

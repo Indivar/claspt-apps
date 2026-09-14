@@ -1,0 +1,1843 @@
+/*
+ * Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
+ * Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
+ */
+
+/*
+ * index.css — global stylesheet and design-token source of truth.
+ *
+ * Loads Tailwind CSS 4 and defines the Claspt design tokens (colors, surfaces,
+ * text) as CSS custom properties in the `@theme` block, with light values as the
+ * default and per-theme overrides applied via the `.dark` / `.theme-*` classes
+ * that ui-store's applyThemeClasses() toggles on <html>. Also holds base element
+ * styles and component/editor/preview styling that isn't expressed with Tailwind
+ * utilities. The `dark` custom-variant lets utilities respond to the .dark class.
+ */
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Claspt design tokens — light mode */
+  --color-surface: #ffffff;
+  --color-surface-raised: #f3f3f7;
+  --color-surface-overlay: #e4e4ed;
+  --color-border: #c8c8d6;
+  --color-text-primary: #1a1a2e;
+  --color-text-secondary: #3e3e5a;
+  --color-text-muted: #6a6a88;
+
+  /* Shared tokens (same in both themes) */
+  --color-accent: #e8930a;
+  --color-accent-hover: #cc7f00;
+  --color-secret: #e8930a;
+  --color-secret-bg: color-mix(in srgb, #e8930a 10%, transparent);
+  --color-danger: #e63946;
+  --color-warning: #d97706;
+  --color-success: #22b855;
+
+  /* Sidebar icons */
+  --color-folder-icon: #d97706;
+
+  /* Panel depth — visible elevation shadows */
+  --shadow-panel: 4px 0 24px -4px rgba(0, 0, 0, 0.08);
+  --shadow-panel-left: -4px 0 24px -4px rgba(0, 0, 0, 0.08);
+}
+
+/* Dark mode — warm midnight, not void-black */
+.dark {
+  --color-surface: #1a1a26;
+  --color-surface-raised: #222232;
+  --color-surface-overlay: #2e2e42;
+  --color-border: #40405a;
+  --color-text-primary: #ededf4;
+  --color-text-secondary: #a8a8c4;
+  --color-text-muted: #8888a8;
+  --color-folder-icon: #f59e0b;
+
+  --shadow-panel: 4px 0 32px -4px rgba(0, 0, 0, 0.35);
+  --shadow-panel-left: -4px 0 32px -4px rgba(0, 0, 0, 0.35);
+}
+
+/* ─── Named Themes ────────────────────────────────── */
+/* Readability-first: text-muted targets WCAG AA (4.5:1 min) on surface. */
+
+/* Nord — Arctic blue-gray palette */
+.theme-nord {
+  --color-surface: #2e3440;
+  --color-surface-raised: #3b4252;
+  --color-surface-overlay: #434c5e;
+  --color-border: #545e72;
+  --color-text-primary: #eceff4;
+  --color-text-secondary: #d8dee9;
+  --color-text-muted: #8892a8;
+  --color-accent: #88c0d0;
+  --color-accent-hover: #81a1c1;
+  --color-secret: #88c0d0;
+  --color-secret-bg: color-mix(in srgb, #88c0d0 10%, transparent);
+  --color-danger: #bf616a;
+  --color-warning: #ebcb8b;
+  --color-success: #a3be8c;
+}
+
+/* Dracula — Deep purple with pink/green accents */
+.theme-dracula {
+  --color-surface: #282a36;
+  --color-surface-raised: #313545;
+  --color-surface-overlay: #3c4158;
+  --color-border: #505570;
+  --color-text-primary: #f8f8f2;
+  --color-text-secondary: #c8c8e0;
+  --color-text-muted: #8890b8;
+  --color-accent: #bd93f9;
+  --color-accent-hover: #a879e6;
+  --color-secret: #ff79c6;
+  --color-secret-bg: color-mix(in srgb, #ff79c6 10%, transparent);
+  --color-danger: #ff5555;
+  --color-warning: #f1fa8c;
+  --color-success: #50fa7b;
+}
+
+/* Solarized Light — Warm cream tones */
+.theme-solarized-light {
+  --color-surface: #fdf6e3;
+  --color-surface-raised: #eee8d5;
+  --color-surface-overlay: #e0d9c5;
+  --color-border: #c8c0ab;
+  --color-text-primary: #073642;
+  --color-text-secondary: #466068;
+  --color-text-muted: #788a8e;
+  --color-accent: #b58900;
+  --color-accent-hover: #a07800;
+  --color-secret: #cb4b16;
+  --color-secret-bg: color-mix(in srgb, #cb4b16 10%, transparent);
+  --color-danger: #dc322f;
+  --color-warning: #b58900;
+  --color-success: #859900;
+}
+
+/* Solarized Dark — Deep teal base */
+.theme-solarized-dark {
+  --color-surface: #002b36;
+  --color-surface-raised: #073642;
+  --color-surface-overlay: #0d4a5a;
+  --color-border: #2a5f6f;
+  --color-text-primary: #fdf6e3;
+  --color-text-secondary: #a0b0b4;
+  --color-text-muted: #8098a0;
+  --color-accent: #b58900;
+  --color-accent-hover: #a07800;
+  --color-secret: #cb4b16;
+  --color-secret-bg: color-mix(in srgb, #cb4b16 10%, transparent);
+  --color-danger: #dc322f;
+  --color-warning: #b58900;
+  --color-success: #859900;
+}
+
+/* Monokai — Classic warm dark with vivid accents */
+.theme-monokai {
+  --color-surface: #272822;
+  --color-surface-raised: #30312a;
+  --color-surface-overlay: #3e3d32;
+  --color-border: #545448;
+  --color-text-primary: #f8f8f2;
+  --color-text-secondary: #d0d0c2;
+  --color-text-muted: #a09a88;
+  --color-accent: #a6e22e;
+  --color-accent-hover: #8cc418;
+  --color-secret: #e6db74;
+  --color-secret-bg: color-mix(in srgb, #e6db74 10%, transparent);
+  --color-danger: #f92672;
+  --color-warning: #e6db74;
+  --color-success: #a6e22e;
+}
+
+/* Gruvbox Dark — Retro earthy warm dark */
+.theme-gruvbox-dark {
+  --color-surface: #282828;
+  --color-surface-raised: #3c3836;
+  --color-surface-overlay: #504945;
+  --color-border: #6a6258;
+  --color-text-primary: #ebdbb2;
+  --color-text-secondary: #d5c4a1;
+  --color-text-muted: #a89984;
+  --color-accent: #fabd2f;
+  --color-accent-hover: #d79921;
+  --color-secret: #fe8019;
+  --color-secret-bg: color-mix(in srgb, #fe8019 10%, transparent);
+  --color-danger: #fb4934;
+  --color-warning: #fabd2f;
+  --color-success: #b8bb26;
+}
+
+/* Gruvbox Light — Retro earthy warm light */
+.theme-gruvbox-light {
+  --color-surface: #fbf1c7;
+  --color-surface-raised: #f0e4b8;
+  --color-surface-overlay: #e5d8aa;
+  --color-border: #c8ba90;
+  --color-text-primary: #3c3836;
+  --color-text-secondary: #504945;
+  --color-text-muted: #7c6f64;
+  --color-accent: #d79921;
+  --color-accent-hover: #b57614;
+  --color-secret: #af3a03;
+  --color-secret-bg: color-mix(in srgb, #af3a03 10%, transparent);
+  --color-danger: #cc241d;
+  --color-warning: #b57614;
+  --color-success: #98971a;
+}
+
+/* Catppuccin Mocha — Pastel dark with warm undertones */
+.theme-catppuccin-mocha {
+  --color-surface: #1e1e2e;
+  --color-surface-raised: #28283d;
+  --color-surface-overlay: #313244;
+  --color-border: #4e5068;
+  --color-text-primary: #cdd6f4;
+  --color-text-secondary: #bac2de;
+  --color-text-muted: #9098b8;
+  --color-accent: #cba6f7;
+  --color-accent-hover: #b48de4;
+  --color-secret: #f5c2e7;
+  --color-secret-bg: color-mix(in srgb, #f5c2e7 10%, transparent);
+  --color-danger: #f38ba8;
+  --color-warning: #f9e2af;
+  --color-success: #a6e3a1;
+}
+
+/* Catppuccin Latte — Pastel light with warm tones */
+.theme-catppuccin-latte {
+  --color-surface: #eff1f5;
+  --color-surface-raised: #e6e9ef;
+  --color-surface-overlay: #d8dce6;
+  --color-border: #bcc0cc;
+  --color-text-primary: #4c4f69;
+  --color-text-secondary: #5c5f77;
+  --color-text-muted: #7c7f96;
+  --color-accent: #8839ef;
+  --color-accent-hover: #7527d6;
+  --color-secret: #ea76cb;
+  --color-secret-bg: color-mix(in srgb, #ea76cb 10%, transparent);
+  --color-danger: #d20f39;
+  --color-warning: #df8e1d;
+  --color-success: #40a02b;
+}
+
+/* Rose Pine — Elegant muted dark with rose accents */
+.theme-rose-pine {
+  --color-surface: #191724;
+  --color-surface-raised: #1f1d2e;
+  --color-surface-overlay: #26233a;
+  --color-border: #44405c;
+  --color-text-primary: #e0def4;
+  --color-text-secondary: #c0b8d8;
+  --color-text-muted: #908aac;
+  --color-accent: #ebbcba;
+  --color-accent-hover: #d4a3a1;
+  --color-secret: #f6c177;
+  --color-secret-bg: color-mix(in srgb, #f6c177 10%, transparent);
+  --color-danger: #eb6f92;
+  --color-warning: #f6c177;
+  --color-success: #9ccfd8;
+}
+
+/* Tokyo Night — Cool blue-purple dark */
+.theme-tokyo-night {
+  --color-surface: #1a1b26;
+  --color-surface-raised: #24283b;
+  --color-surface-overlay: #2f3549;
+  --color-border: #444b68;
+  --color-text-primary: #c0caf5;
+  --color-text-secondary: #a9b1d6;
+  --color-text-muted: #7e88b0;
+  --color-accent: #7aa2f7;
+  --color-accent-hover: #6290e5;
+  --color-secret: #bb9af7;
+  --color-secret-bg: color-mix(in srgb, #bb9af7 10%, transparent);
+  --color-danger: #f7768e;
+  --color-warning: #e0af68;
+  --color-success: #9ece6a;
+}
+
+/* One Dark — Atom's classic dark theme */
+.theme-one-dark {
+  --color-surface: #282c34;
+  --color-surface-raised: #2f333d;
+  --color-surface-overlay: #3a3f4b;
+  --color-border: #545a6a;
+  --color-text-primary: #abb2bf;
+  --color-text-secondary: #9da5b4;
+  --color-text-muted: #848c9e;
+  --color-accent: #61afef;
+  --color-accent-hover: #519ad7;
+  --color-secret: #c678dd;
+  --color-secret-bg: color-mix(in srgb, #c678dd 10%, transparent);
+  --color-danger: #e06c75;
+  --color-warning: #e5c07b;
+  --color-success: #98c379;
+}
+
+/* GitHub Light — Clean bright editor theme */
+.theme-github-light {
+  --color-surface: #ffffff;
+  --color-surface-raised: #f6f8fa;
+  --color-surface-overlay: #e8ecf0;
+  --color-border: #c8cfd6;
+  --color-text-primary: #1f2328;
+  --color-text-secondary: #525960;
+  --color-text-muted: #6e7781;
+  --color-accent: #0969da;
+  --color-accent-hover: #0756b5;
+  --color-secret: #8250df;
+  --color-secret-bg: color-mix(in srgb, #8250df 10%, transparent);
+  --color-danger: #cf222e;
+  --color-warning: #9a6700;
+  --color-success: #1a7f37;
+}
+
+/* GitHub Dark — GitHub's dark mode */
+.theme-github-dark {
+  --color-surface: #0d1117;
+  --color-surface-raised: #161b22;
+  --color-surface-overlay: #21262d;
+  --color-border: #30363d;
+  --color-text-primary: #e6edf3;
+  --color-text-secondary: #b1bac4;
+  --color-text-muted: #8b949e;
+  --color-accent: #58a6ff;
+  --color-accent-hover: #4090e0;
+  --color-secret: #d2a8ff;
+  --color-secret-bg: color-mix(in srgb, #d2a8ff 10%, transparent);
+  --color-danger: #f85149;
+  --color-warning: #d29922;
+  --color-success: #3fb950;
+}
+
+/* Everforest Dark — Soft green-tinted dark */
+.theme-everforest-dark {
+  --color-surface: #2d353b;
+  --color-surface-raised: #343f44;
+  --color-surface-overlay: #3d484d;
+  --color-border: #546058;
+  --color-text-primary: #d3c6aa;
+  --color-text-secondary: #bbb0a0;
+  --color-text-muted: #9da9a0;
+  --color-accent: #a7c080;
+  --color-accent-hover: #8faa68;
+  --color-secret: #dbbc7f;
+  --color-secret-bg: color-mix(in srgb, #dbbc7f 10%, transparent);
+  --color-danger: #e67e80;
+  --color-warning: #dbbc7f;
+  --color-success: #a7c080;
+}
+
+/* Kanagawa — Japanese ink-inspired dark */
+.theme-kanagawa {
+  --color-surface: #1f1f28;
+  --color-surface-raised: #2a2a37;
+  --color-surface-overlay: #363646;
+  --color-border: #4a4a5a;
+  --color-text-primary: #dcd7ba;
+  --color-text-secondary: #c8c093;
+  --color-text-muted: #9a9580;
+  --color-accent: #7e9cd8;
+  --color-accent-hover: #6a88c4;
+  --color-secret: #d27e99;
+  --color-secret-bg: color-mix(in srgb, #d27e99 10%, transparent);
+  --color-danger: #e82424;
+  --color-warning: #ff9e3b;
+  --color-success: #98bb6c;
+}
+
+/* Ayu Light — Modern warm light */
+.theme-ayu-light {
+  --color-surface: #fcfcfc;
+  --color-surface-raised: #f3f4f5;
+  --color-surface-overlay: #e8e9eb;
+  --color-border: #d4d5d8;
+  --color-text-primary: #5c6166;
+  --color-text-secondary: #6b7178;
+  --color-text-muted: #8b9199;
+  --color-accent: #ff9940;
+  --color-accent-hover: #e88530;
+  --color-secret: #a37acc;
+  --color-secret-bg: color-mix(in srgb, #a37acc 10%, transparent);
+  --color-danger: #f07171;
+  --color-warning: #e6b673;
+  --color-success: #86b300;
+}
+
+/* Midnight Blue — Deep navy professional */
+.theme-midnight-blue {
+  --color-surface: #0f172a;
+  --color-surface-raised: #1e293b;
+  --color-surface-overlay: #273548;
+  --color-border: #374a60;
+  --color-text-primary: #e2e8f0;
+  --color-text-secondary: #b0bec8;
+  --color-text-muted: #8899a8;
+  --color-accent: #38bdf8;
+  --color-accent-hover: #2ba0d8;
+  --color-secret: #c084fc;
+  --color-secret-bg: color-mix(in srgb, #c084fc 10%, transparent);
+  --color-danger: #f87171;
+  --color-warning: #fbbf24;
+  --color-success: #4ade80;
+}
+
+:root {
+  font-size: calc(16px * var(--ui-scale, 1));
+  font-family:
+    "SF Pro Display",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    system-ui,
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv11", "ss01"; /* Geometric alternates when available */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+  background: var(--color-surface);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Unlock Screen — premium vault aesthetic
+   ═══════════════════════════════════════════════════════════ */
+
+/* Geometric grid pattern background */
+.unlock-bg {
+  position: relative;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.unlock-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--unlock-grid-color) 1px, transparent 1px),
+    linear-gradient(90deg, var(--unlock-grid-color) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, black 20%, transparent 70%);
+  -webkit-mask-image: radial-gradient(
+    ellipse 70% 60% at 50% 50%,
+    black 20%,
+    transparent 70%
+  );
+  animation: unlock-grid-fade 1.2s ease-out;
+}
+
+/* Warm radial glow behind the card */
+.unlock-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse 50% 50% at 50% 48%,
+    var(--unlock-glow-color) 0%,
+    transparent 70%
+  );
+  pointer-events: none;
+  animation: unlock-glow-pulse 6s ease-in-out infinite alternate;
+}
+
+/* Light mode unlock tokens */
+:root {
+  --unlock-grid-color: rgba(0, 0, 0, 0.05);
+  --unlock-glow-color: rgba(232, 147, 10, 0.08);
+  --unlock-card-bg: rgba(255, 255, 255, 0.92);
+  --unlock-card-border: rgba(0, 0, 0, 0.06);
+  --unlock-card-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 40px rgba(0, 0, 0, 0.08),
+    0 32px 64px rgba(0, 0, 0, 0.06);
+}
+
+/* Dark mode unlock tokens */
+.dark {
+  --unlock-grid-color: rgba(255, 255, 255, 0.035);
+  --unlock-glow-color: rgba(232, 147, 10, 0.08);
+  --unlock-card-bg: rgba(34, 34, 50, 0.85);
+  --unlock-card-border: rgba(255, 255, 255, 0.06);
+  --unlock-card-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 40px rgba(0, 0, 0, 0.3),
+    0 32px 64px rgba(0, 0, 0, 0.15);
+}
+
+.unlock-card {
+  position: relative;
+  z-index: 1;
+  background: var(--unlock-card-bg);
+  border: 1px solid var(--unlock-card-border);
+  box-shadow: var(--unlock-card-shadow);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+}
+
+/* Subtle accent glow on the card top edge */
+.unlock-card::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 15%;
+  right: 15%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-accent), transparent);
+  opacity: 0.5;
+  border-radius: 1px;
+}
+
+/* Entrance animations */
+@keyframes unlock-grid-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes unlock-glow-pulse {
+  from {
+    opacity: 0.7;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes unlock-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes unlock-logo-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes unlock-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.unlock-card-anim {
+  animation: unlock-card-enter 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.unlock-logo-anim {
+  animation: unlock-logo-enter 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s both;
+}
+
+.unlock-stagger-1 {
+  animation: unlock-fade-up 0.4s ease-out 0.2s both;
+}
+.unlock-stagger-2 {
+  animation: unlock-fade-up 0.4s ease-out 0.28s both;
+}
+.unlock-stagger-3 {
+  animation: unlock-fade-up 0.4s ease-out 0.36s both;
+}
+.unlock-stagger-4 {
+  animation: unlock-fade-up 0.4s ease-out 0.44s both;
+}
+.unlock-stagger-5 {
+  animation: unlock-fade-up 0.4s ease-out 0.52s both;
+}
+
+/* Input focus ring — accent-colored glow */
+.unlock-input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
+  outline: none;
+}
+
+/* Submit button hover glow */
+.unlock-submit {
+  transition: all 0.2s ease;
+}
+.unlock-submit:hover:not(:disabled) {
+  box-shadow:
+    0 0 0 3px rgba(245, 158, 11, 0.15),
+    0 4px 12px rgba(245, 158, 11, 0.2);
+  transform: translateY(-1px);
+}
+.unlock-submit:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+/* Markdown preview prose styles */
+.claspt-prose {
+  color: var(--color-text-primary);
+  line-height: 1.75;
+  max-width: none;
+}
+.claspt-prose h1 {
+  font-size: 1.875rem;
+  font-weight: 700;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+.claspt-prose h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+.claspt-prose h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+}
+.claspt-prose h4 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+.claspt-prose p {
+  margin-bottom: 1rem;
+}
+.claspt-prose code {
+  background: var(--color-surface-overlay);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+}
+.claspt-prose pre {
+  background: var(--color-surface-raised);
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin-bottom: 1rem;
+}
+.claspt-prose pre code {
+  background: none;
+  padding: 0;
+}
+
+/* ── Syntax highlighting (highlight.js) ── */
+.claspt-prose pre code .hljs-keyword,
+.claspt-prose pre code .hljs-selector-tag,
+.claspt-prose pre code .hljs-built_in,
+.claspt-prose pre code .hljs-type {
+  color: #d73a49;
+}
+.claspt-prose pre code .hljs-string,
+.claspt-prose pre code .hljs-addition {
+  color: #22863a;
+}
+.claspt-prose pre code .hljs-number,
+.claspt-prose pre code .hljs-literal {
+  color: #005cc5;
+}
+.claspt-prose pre code .hljs-comment,
+.claspt-prose pre code .hljs-quote {
+  color: #6a737d;
+  font-style: italic;
+}
+.claspt-prose pre code .hljs-function .hljs-title,
+.claspt-prose pre code .hljs-title.function_,
+.claspt-prose pre code .hljs-title {
+  color: #6f42c1;
+}
+.claspt-prose pre code .hljs-variable,
+.claspt-prose pre code .hljs-template-variable,
+.claspt-prose pre code .hljs-attr {
+  color: #e36209;
+}
+.claspt-prose pre code .hljs-meta {
+  color: #6a737d;
+}
+.claspt-prose pre code .hljs-deletion {
+  color: #b31d28;
+  background: #ffeef0;
+}
+.claspt-prose pre code .hljs-section {
+  color: #005cc5;
+  font-weight: 600;
+}
+.claspt-prose pre code .hljs-regexp,
+.claspt-prose pre code .hljs-symbol {
+  color: #032f62;
+}
+
+.dark .claspt-prose pre code .hljs-keyword,
+.dark .claspt-prose pre code .hljs-selector-tag,
+.dark .claspt-prose pre code .hljs-built_in,
+.dark .claspt-prose pre code .hljs-type {
+  color: #ff7b72;
+}
+.dark .claspt-prose pre code .hljs-string,
+.dark .claspt-prose pre code .hljs-addition {
+  color: #7ee787;
+}
+.dark .claspt-prose pre code .hljs-number,
+.dark .claspt-prose pre code .hljs-literal {
+  color: #79c0ff;
+}
+.dark .claspt-prose pre code .hljs-comment,
+.dark .claspt-prose pre code .hljs-quote {
+  color: #8b949e;
+  font-style: italic;
+}
+.dark .claspt-prose pre code .hljs-function .hljs-title,
+.dark .claspt-prose pre code .hljs-title.function_,
+.dark .claspt-prose pre code .hljs-title {
+  color: #d2a8ff;
+}
+.dark .claspt-prose pre code .hljs-variable,
+.dark .claspt-prose pre code .hljs-template-variable,
+.dark .claspt-prose pre code .hljs-attr {
+  color: #ffa657;
+}
+.dark .claspt-prose pre code .hljs-meta {
+  color: #8b949e;
+}
+.dark .claspt-prose pre code .hljs-deletion {
+  color: #ffa198;
+  background: rgba(248, 81, 73, 0.15);
+}
+.dark .claspt-prose pre code .hljs-section {
+  color: #79c0ff;
+  font-weight: 600;
+}
+.dark .claspt-prose pre code .hljs-regexp,
+.dark .claspt-prose pre code .hljs-symbol {
+  color: #a5d6ff;
+}
+.claspt-prose blockquote {
+  border-left: 3px solid var(--color-accent);
+  padding-left: 1rem;
+  color: var(--color-text-muted);
+  margin: 0 0 1rem;
+}
+.claspt-prose ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+}
+.claspt-prose ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+}
+.claspt-prose ul ul {
+  list-style-type: circle;
+}
+.claspt-prose ul ul ul {
+  list-style-type: square;
+}
+.claspt-prose li {
+  margin-bottom: 0.25rem;
+}
+.claspt-prose table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 1rem;
+}
+.claspt-prose th,
+.claspt-prose td {
+  border: 1px solid var(--color-border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.claspt-prose th {
+  background: var(--color-surface-raised);
+  font-weight: 600;
+}
+.claspt-prose a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.claspt-prose hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 1.5rem 0;
+}
+.claspt-prose img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+}
+.claspt-prose input[type="checkbox"] {
+  margin-right: 0.5rem;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Markdown Extension Styles
+   ═══════════════════════════════════════════════════════════ */
+
+/* Callouts — styled blockquote alternatives */
+.callout {
+  border-left: 4px solid var(--callout-color, #448aff);
+  background: color-mix(
+    in srgb,
+    var(--callout-color, #448aff) 8%,
+    var(--color-surface, #fff)
+  );
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+}
+.callout-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+.callout-icon {
+  flex-shrink: 0;
+}
+.callout-title {
+  font-size: 0.9rem;
+  color: var(--color-text-primary);
+}
+.callout-body {
+  margin-top: 0.25rem;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+.callout-body p:last-child {
+  margin-bottom: 0;
+}
+/* Type-specific border colors */
+.callout-note {
+  --callout-color: #448aff;
+}
+.callout-info {
+  --callout-color: #448aff;
+}
+.callout-tip {
+  --callout-color: #00c853;
+}
+.callout-success {
+  --callout-color: #00c853;
+}
+.callout-warning {
+  --callout-color: #ff9100;
+}
+.callout-danger {
+  --callout-color: #ff1744;
+}
+.callout-bug {
+  --callout-color: #ff1744;
+}
+.callout-question {
+  --callout-color: #aa00ff;
+}
+.callout-example {
+  --callout-color: #aa00ff;
+}
+.callout-quote {
+  --callout-color: #78909c;
+  font-style: italic;
+}
+
+.mermaid-block {
+  margin: 1rem 0;
+  text-align: center;
+  overflow-x: auto;
+}
+.mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+}
+.mermaid-loading {
+  padding: 2rem;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
+}
+.mermaid-error {
+  padding: 1rem;
+  border: 1px solid #ff1744;
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, #ff1744 8%, var(--color-surface, #fff));
+  text-align: left;
+}
+.mermaid-error strong {
+  color: #ff1744;
+}
+.mermaid-error pre {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  color: var(--color-text-secondary);
+}
+
+/* Wiki-links */
+a.wikilink {
+  color: var(--color-accent, #6366f1);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+a.wikilink:hover {
+  text-decoration-style: solid;
+}
+
+/* Charts */
+.chart-block {
+  margin: 1rem 0;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  background: var(--color-surface-raised, #f8f8fb);
+}
+.chart-loading {
+  padding: 2rem;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
+  text-align: center;
+}
+.chart-error {
+  padding: 1rem;
+  border: 1px solid #ff1744;
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, #ff1744 8%, var(--color-surface, #fff));
+}
+.chart-error strong {
+  color: #ff1744;
+}
+.chart-error pre {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  color: var(--color-text-secondary);
+}
+
+/* Graphviz */
+.graphviz-block {
+  margin: 1rem 0;
+  padding: 1rem;
+  text-align: center;
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  background: var(--color-surface-raised, #f8f8fb);
+}
+.graphviz-block svg {
+  max-width: 100%;
+  height: auto;
+}
+.graphviz-loading {
+  padding: 2rem;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
+}
+.graphviz-error {
+  padding: 1rem;
+  border: 1px solid #ff1744;
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, #ff1744 8%, var(--color-surface, #fff));
+  text-align: left;
+}
+.graphviz-error strong {
+  color: #ff1744;
+}
+.graphviz-error pre {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  color: var(--color-text-secondary);
+}
+
+/* Table of Contents */
+.toc-block {
+  background: var(--color-surface-raised, #f3f3f7);
+  border: 1px solid var(--color-border, #d2d2dc);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+}
+.toc-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+  color: var(--color-text-primary);
+}
+.toc-block ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.toc-block li {
+  padding: 0.15rem 0;
+}
+.toc-link {
+  color: var(--color-accent, #6366f1);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+.toc-link:hover {
+  text-decoration: underline;
+}
+
+/* Kanban boards */
+.kanban-board {
+  display: flex;
+  gap: 0.75rem;
+  overflow-x: auto;
+  padding: 0.5rem 0;
+  margin: 1rem 0;
+}
+.kanban-column {
+  min-width: 200px;
+  max-width: 280px;
+  flex: 1;
+  background: var(--color-surface-raised, #f3f3f7);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+.kanban-column-header {
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--color-text-primary);
+}
+.kanban-count {
+  font-size: 0.7rem;
+  font-weight: 500;
+  background: var(--color-surface-overlay, #e6e6ee);
+  border-radius: 999px;
+  padding: 0.1rem 0.4rem;
+  color: var(--color-text-muted);
+}
+.kanban-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.kanban-card {
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #d2d2dc);
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.625rem;
+  font-size: 0.8rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  color: var(--color-text-primary);
+}
+.kanban-card.kanban-done {
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+.kanban-checkbox {
+  flex-shrink: 0;
+  font-size: 0.9rem;
+}
+
+/* Spreadsheets */
+.spreadsheet-block {
+  margin: 1rem 0;
+  overflow-x: auto;
+}
+.spreadsheet-table {
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  width: auto;
+}
+.spreadsheet-table th,
+.spreadsheet-table td {
+  border: 1px solid var(--color-border, #d2d2dc);
+  padding: 0.3rem 0.5rem;
+  min-width: 60px;
+}
+.spreadsheet-table thead th {
+  background: var(--color-surface-raised, #f3f3f7);
+  font-weight: 600;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+.spreadsheet-table tbody th {
+  background: var(--color-surface-raised, #f3f3f7);
+  font-weight: 500;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  min-width: 30px;
+}
+.spreadsheet-corner {
+  min-width: 30px;
+}
+
+/* Timelines */
+.timeline-block {
+  margin: 1rem 0;
+}
+.timeline-loading {
+  padding: 2rem;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
+  text-align: center;
+}
+.timeline-error {
+  padding: 1rem;
+  border: 1px solid #ff1744;
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, #ff1744 8%, var(--color-surface, #fff));
+}
+.timeline-error strong {
+  color: #ff1744;
+}
+.timeline-error pre {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  color: var(--color-text-secondary);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   App Shell — premium inner screen design system
+   ═══════════════════════════════════════════════════════════ */
+
+/* Themed scrollbars (WebKit + Firefox) */
+:root {
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+  scrollbar-width: thin;
+}
+.dark {
+  scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+}
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.06);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ─── Sidebar panel styling ────────────────────────── */
+
+.sidebar-panel {
+  position: relative;
+  box-shadow: var(--shadow-panel);
+}
+
+/* Accent gradient bar at the very top of the sidebar */
+.sidebar-panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--color-accent), #f5c542, var(--color-accent));
+  z-index: 1;
+}
+
+/* Sidebar gradient background — subtle warmth */
+.sidebar-gradient {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-accent) 3%, var(--color-surface-raised)) 0%,
+    var(--color-surface-raised) 120px
+  );
+}
+.dark .sidebar-gradient {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-accent) 4%, var(--color-surface-raised)) 0%,
+    var(--color-surface-raised) 120px
+  );
+}
+
+/* Brand text gradient */
+.brand-gradient {
+  background: linear-gradient(
+    135deg,
+    var(--color-accent) 0%,
+    #f5c542 60%,
+    var(--color-accent) 100%
+  );
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ─── Inspector panel styling ──────────────────────── */
+
+.inspector-panel {
+  box-shadow: var(--shadow-panel-left);
+}
+
+/* ─── Page item — bold active state with glow ──────── */
+
+.page-item {
+  position: relative;
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+  border-radius: 10px;
+}
+.page-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 15%;
+  bottom: 15%;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--color-accent);
+  opacity: 0;
+}
+.page-item:hover::before {
+  opacity: 0.5;
+  transform: scaleY(0.7);
+}
+.page-item.active::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+.page-item.active {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+.dark .page-item.active {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 12%, transparent),
+    0 0 20px -6px color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+.page-item:hover:not(.active) {
+  background: var(--color-surface-overlay);
+}
+
+/* ─── Modal overlay — strong backdrop ──────────────── */
+
+.modal-overlay {
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  animation: modal-overlay-in 0.2s ease-out;
+}
+
+@keyframes modal-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Modal card — scale-in with stronger shadow */
+.modal-card {
+  animation: modal-card-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.05),
+    0 8px 40px rgba(0, 0, 0, 0.12),
+    0 24px 80px rgba(0, 0, 0, 0.08);
+}
+.dark .modal-card {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 8px 40px rgba(0, 0, 0, 0.5),
+    0 24px 80px rgba(0, 0, 0, 0.3);
+}
+
+@keyframes modal-card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Command palette — slide-down */
+.cmd-palette {
+  animation: cmd-palette-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.06),
+    0 16px 48px rgba(0, 0, 0, 0.15);
+}
+.dark .cmd-palette {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+@keyframes cmd-palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ─── Accent focus ring ────────────────────────────── */
+
+.focus-accent:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 15%, transparent);
+  outline: none;
+}
+
+/* ─── Icon button — tactile feedback ───────────────── */
+
+.icon-btn {
+  transition: all 0.15s ease;
+  border-radius: 8px;
+}
+.icon-btn:hover {
+  background: var(--color-surface-overlay);
+  color: var(--color-text-primary);
+}
+.icon-btn:active {
+  transform: scale(0.92);
+  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-surface-overlay));
+}
+
+/* ─── Editor title bar ─────────────────────────────── */
+
+.editor-titlebar {
+  background: linear-gradient(
+    180deg,
+    var(--color-surface) 0%,
+    color-mix(in srgb, var(--color-surface-raised) 30%, var(--color-surface)) 100%
+  );
+}
+
+/* Editor mode toggle pill */
+.mode-toggle {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.mode-btn {
+  border-radius: 7px;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+.mode-btn.active {
+  background: var(--color-accent);
+  color: white;
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--color-accent) 40%, transparent);
+}
+.mode-btn:not(.active) {
+  color: var(--color-text-muted);
+}
+.mode-btn:not(.active):hover {
+  color: var(--color-text-primary);
+  background: var(--color-surface-overlay);
+}
+
+/* ─── Toolbar ──────────────────────────────────────── */
+
+.editor-toolbar {
+  background: var(--color-surface-raised);
+  border-bottom: 1px solid var(--color-border);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.03);
+}
+
+/* ─── Tag pills ────────────────────────────────────── */
+
+.tag-pill {
+  transition: all 0.15s ease;
+  font-weight: 500;
+}
+.tag-pill:hover {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+
+/* ─── Inspector commit card ────────────────────────── */
+
+.commit-card {
+  transition: all 0.15s ease;
+  border: 1px solid var(--color-border);
+}
+.commit-card:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border));
+  background: color-mix(in srgb, var(--color-accent) 4%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+/* ─── Secret card — premium vault feel ─────────────── */
+
+.secret-card-locked {
+  border: 2px solid color-mix(in srgb, var(--color-accent) 40%, var(--color-border));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-accent) 6%, var(--color-surface)) 0%,
+    color-mix(in srgb, var(--color-accent) 2%, var(--color-surface)) 100%
+  );
+  transition: all 0.2s ease;
+}
+.secret-card-locked:hover {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 24px -6px color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+
+.secret-card-revealed {
+  border: 2px solid var(--color-accent);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-accent) 8%, var(--color-surface)) 0%,
+    color-mix(in srgb, var(--color-accent) 3%, var(--color-surface)) 100%
+  );
+  box-shadow: 0 0 32px -8px color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+
+/* Flash animation for scroll-to-secret highlight */
+@keyframes secret-flash {
+  0% {
+    box-shadow: 0 0 0 3px var(--color-accent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.secret-card-flash {
+  animation: secret-flash 0.8s ease-out;
+}
+
+/* ─── Footer glass effect ──────────────────────────── */
+
+.sidebar-footer {
+  background: var(--color-surface-raised);
+}
+
+/* ─── Section label — refined ──────────────────────── */
+
+.section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* ─── Accent button — gradient with glow ───────────── */
+
+.btn-accent {
+  background: linear-gradient(
+    180deg,
+    var(--color-accent) 0%,
+    var(--color-accent-hover) 100%
+  );
+  color: white;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+.btn-accent:hover:not(:disabled) {
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--color-accent) 15%, transparent),
+    0 4px 16px color-mix(in srgb, var(--color-accent) 35%, transparent);
+  transform: translateY(-1px);
+}
+.btn-accent:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--color-accent) 25%, transparent);
+}
+.btn-accent:disabled {
+  opacity: 0.4;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Shimmer sweep — subtle light line drifting across surfaces
+   ═══════════════════════════════════════════════════════════ */
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+@keyframes shimmer-sweep {
+  0% {
+    transform: translateX(-200%);
+  }
+  15% {
+    transform: translateX(200%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
+/* Position context + clip for shimmer on elements that need it */
+.commit-card,
+.secret-card-locked,
+.secret-card-revealed,
+.modal-card {
+  position: relative;
+  overflow: hidden;
+}
+.page-item,
+.unlock-card {
+  overflow: hidden;
+}
+
+/* ─── Unlock card — brighter shimmer on login screen ── */
+
+.unlock-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(
+    120deg,
+    transparent 25%,
+    color-mix(in srgb, var(--color-accent) 8%, transparent) 40%,
+    color-mix(in srgb, var(--color-accent) 14%, transparent) 50%,
+    color-mix(in srgb, var(--color-accent) 8%, transparent) 60%,
+    transparent 75%
+  );
+  transform: translateX(-200%);
+  animation: shimmer-sweep 10s linear 1s infinite;
+  will-change: transform;
+}
+
+/* ─── Modal card — medium shimmer ──────────────────── */
+
+.modal-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(
+    120deg,
+    transparent 30%,
+    color-mix(in srgb, var(--color-accent) 4%, transparent) 44%,
+    color-mix(in srgb, var(--color-accent) 8%, transparent) 50%,
+    color-mix(in srgb, var(--color-accent) 4%, transparent) 56%,
+    transparent 70%
+  );
+  transform: translateX(-200%);
+  animation: shimmer-sweep 14s linear 0.5s infinite;
+  will-change: transform;
+}
+
+/* ─── Commit cards (inspector) — subtle ───────────── */
+
+.commit-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(
+    120deg,
+    transparent 30%,
+    color-mix(in srgb, var(--color-accent) 3%, transparent) 45%,
+    color-mix(in srgb, var(--color-accent) 6%, transparent) 50%,
+    color-mix(in srgb, var(--color-accent) 3%, transparent) 55%,
+    transparent 70%
+  );
+  transform: translateX(-200%);
+  animation: shimmer-sweep 16s linear 2s infinite;
+  will-change: transform;
+}
+
+/* ─── Secret cards — medium shimmer ───────────────── */
+
+.secret-card-locked::after,
+.secret-card-revealed::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(
+    120deg,
+    transparent 25%,
+    color-mix(in srgb, var(--color-accent) 5%, transparent) 42%,
+    color-mix(in srgb, var(--color-accent) 10%, transparent) 50%,
+    color-mix(in srgb, var(--color-accent) 5%, transparent) 58%,
+    transparent 75%
+  );
+  transform: translateX(-200%);
+  animation: shimmer-sweep 12s linear 1.5s infinite;
+  will-change: transform;
+}
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .commit-card::after,
+  .secret-card-locked::after,
+  .secret-card-revealed::after,
+  .modal-card::after,
+  .unlock-card::after {
+    animation: none;
+  }
+}
+
+/* ─── Native form controls — force theme colors ───── */
+
+select,
+input[type="number"] {
+  color: var(--color-text-primary);
+  background-color: var(--color-surface);
+  color-scheme: light;
+}
+
+.dark select,
+.dark input[type="number"] {
+  color-scheme: dark;
+}
+
+select option {
+  color: var(--color-text-primary);
+  background-color: var(--color-surface);
+}
+
+/* ─── Empty state ──────────────────────────────────── */
+
+.empty-state-icon {
+  background: linear-gradient(
+    135deg,
+    var(--color-surface-raised) 0%,
+    var(--color-surface-overlay) 100%
+  );
+  border: 1px solid var(--color-border);
+}
+
+/* ─── ABC Music Extension ────────────────────────── */
+
+.abc-block {
+  margin: 1rem 0;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: var(--color-surface-raised);
+  overflow-x: auto;
+}
+.abc-render svg {
+  max-width: 100%;
+  height: auto;
+}
+.abc-loading {
+  color: var(--color-text-muted);
+  font-style: italic;
+  padding: 1rem;
+}
+.abc-error {
+  color: var(--color-danger);
+  font-size: 0.85rem;
+  padding: 0.5rem;
+  background: var(--color-surface);
+  border-radius: 4px;
+}
+
+/* ─── Embeds Extension ───────────────────────────── */
+
+.embed-block {
+  margin: 1rem 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--color-surface-raised);
+}
+.embed-iframe {
+  width: 100%;
+  height: 400px;
+  border: none;
+  display: block;
+}
+.embed-youtube .embed-iframe,
+.embed-video .embed-iframe {
+  aspect-ratio: 16 / 9;
+  height: auto;
+}
+.embed-blocked {
+  padding: 1rem;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+.embed-blocked-icon {
+  margin-right: 0.25rem;
+}
+
+/* ─── Presentations Extension ────────────────────── */
+
+.present-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.present-btn:hover {
+  background: var(--color-surface-overlay);
+}
+.slide-indicator {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px dashed var(--color-border);
+}
+
+/* Fullscreen presentation overlay */
+.presentation-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: var(--color-bg, #111);
+  color: var(--color-text-primary, #fff);
+  display: flex;
+  flex-direction: column;
+}
+.presentation-slide {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 4rem;
+  overflow: auto;
+  font-size: 1.5rem;
+  line-height: 1.6;
+}
+.presentation-slide .slide-content {
+  max-width: 900px;
+  width: 100%;
+}
+.presentation-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.3);
+}
+.presentation-nav,
+.presentation-exit {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.presentation-nav:hover,
+.presentation-exit:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.presentation-nav:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.presentation-counter {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+/* ─── Custom Tooltips (faster than native title) ─── */
+[data-tooltip] {
+  position: relative;
+}
+[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: var(--color-surface-raised);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  pointer-events: none;
+  z-index: 100;
+  animation: tooltip-fade 0.15s ease;
+}
+@keyframes tooltip-fade {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}

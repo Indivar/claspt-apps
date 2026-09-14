@@ -1,0 +1,6 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="128" height="128" rx="22" fill="#0c1017"/>
+  <rect x="2" y="2" width="124" height="124" rx="20" stroke="#1c2128" stroke-width="2"/>
+  <path d="M64 26C54.06 26 46 34.06 46 44V56H42C39.79 56 38 57.79 38 60V100C38 102.21 39.79 104 42 104H86C88.21 104 90 102.21 90 100V60C90 57.79 88.21 56 86 56H82V44C82 34.06 73.94 26 64 26ZM64 34C69.52 34 74 38.48 74 44V56H54V44C54 38.48 58.48 34 64 34ZM64 72C66.76 72 69 74.24 69 77C69 78.86 67.97 80.43 66.5 81.24V87C66.5 88.38 65.38 89.5 64 89.5C62.62 89.5 61.5 88.38 61.5 87V81.24C60.03 80.43 59 78.86 59 77C59 74.24 61.24 72 64 72Z" fill="#d4930a"/>
+  <text x="64" y="118" text-anchor="middle" fill="#6e7681" font-family="sans-serif" font-size="10" font-weight="600">CLASPT</text>
+</svg>

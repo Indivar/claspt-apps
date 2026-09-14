@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+  :root {
+    --bg: #ffffff;
+    --text: #1a1a2e;
+    --text-muted: #6b7280;
+    --accent: #6366f1;
+    --border: #e5e7eb;
+    --surface: #f9fafb;
+    --secret-color: #f59e0b;
+    --secret-bg: rgba(245, 158, 11, 0.1);
+    --danger: #ef4444;
+    --success: #22c55e;
+  }
+  .dark {
+    --bg: #0f0f23;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #818cf8;
+    --border: #1e293b;
+    --surface: #1e1e3a;
+    --secret-color: #fbbf24;
+    --secret-bg: rgba(251, 191, 36, 0.1);
+    --danger: #f87171;
+    --success: #4ade80;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.7;
+    color: var(--text);
+    background: var(--bg);
+    padding: 16px;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+  h1 { font-size: 1.75em; font-weight: 700; margin: 1em 0 0.5em; }
+  h2 { font-size: 1.5em; font-weight: 700; margin: 0.8em 0 0.4em; }
+  h3 { font-size: 1.25em; font-weight: 600; margin: 0.6em 0 0.3em; }
+  h4, h5, h6 { font-size: 1em; font-weight: 600; margin: 0.5em 0 0.25em; }
+  p { margin: 0.5em 0; }
+  a { color: var(--accent); text-decoration: none; }
+  code {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.9em;
+    background: var(--surface);
+    border-radius: 4px;
+    padding: 2px 6px;
+  }
+  pre {
+    background: var(--surface);
+    border-radius: 8px;
+    padding: 12px 16px;
+    overflow-x: auto;
+    margin: 0.75em 0;
+  }
+  pre code { background: none; padding: 0; font-size: 14px; }
+  /* highlight.js overrides */
+  pre code.hljs { background: none; padding: 0; }
+  .hljs-comment, .hljs-quote { color: var(--text-muted); font-style: italic; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-addition { color: #c678dd; }
+  .hljs-string, .hljs-meta .hljs-string, .hljs-regexp { color: #98c379; }
+  .hljs-number, .hljs-literal { color: #d19a66; }
+  .hljs-title, .hljs-section, .hljs-name { color: #61afef; }
+  .hljs-built_in, .hljs-type { color: #e5c07b; }
+  .hljs-attr, .hljs-variable, .hljs-template-variable { color: #e06c75; }
+  .hljs-symbol, .hljs-bullet { color: #56b6c2; }
+  .hljs-meta { color: var(--text-muted); }
+  .hljs-deletion { color: #e06c75; }
+  blockquote {
+    border-left: 3px solid var(--accent);
+    padding-left: 12px;
+    color: var(--text-muted);
+    margin: 0.5em 0;
+  }
+  ul, ol { padding-left: 1.5em; margin: 0.5em 0; }
+  li { margin: 0.2em 0; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+  table { border-collapse: collapse; width: 100%; margin: 0.75em 0; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  th { background: var(--surface); font-weight: 600; }
+  img { max-width: 100%; height: auto; border-radius: 8px; }
+
+  /* Secret block placeholder */
+  .secret-placeholder {
+    background: var(--secret-bg);
+    border-left: 3px solid var(--secret-color);
+    padding: 8px 12px;
+    border-radius: 4px;
+    margin: 0.5em 0;
+    color: var(--secret-color);
+    font-weight: 500;
+  }
+
+  /* Callouts */
+  .callout {
+    border-left: 3px solid var(--callout-color, var(--accent));
+    background: color-mix(in srgb, var(--callout-color, var(--accent)) 8%, transparent);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin: 0.75em 0;
+  }
+  .callout-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .callout-icon { flex-shrink: 0; }
+  .callout-note, .callout-info { --callout-color: #448aff; }
+  .callout-tip, .callout-success { --callout-color: #00c853; }
+  .callout-warning { --callout-color: #ff9100; }
+  .callout-danger, .callout-bug { --callout-color: #ff1744; }
+  .callout-question, .callout-example { --callout-color: #aa00ff; }
+  .callout-quote { --callout-color: #78909c; }
+
+  /* Loading state */
+  #loading {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 2em;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+<div id="content"><div id="loading">Loading preview…</div></div>
+<script>
+  // Security model: this HTML is loaded locally by React Native WebView.
+  // Content comes exclusively from the app (user's own markdown), not from
+  // external untrusted sources. Secret blocks are masked before rendering.
+  var contentEl = document.getElementById('content');
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function findSecretBlocks(content) {
+    var results = [];
+    var OPEN = ':::secret[';
+    var pos = 0;
+    while (pos < content.length) {
+      var start = content.indexOf(OPEN, pos);
+      if (start === -1) break;
+      var ab = start + OPEN.length;
+      var closeIdx = -1;
+      for (var i = 0; i < content.length - ab; i++) {
+        if (content[ab + i] === ']' && (i === 0 || content[ab + i - 1] !== '\\')) {
+          closeIdx = i; break;
+        }
+      }
+      if (closeIdx === -1) break;
+      var label = content.slice(ab, ab + closeIdx).replace(/\\\]/g, ']');
+      var bodyStart = ab + closeIdx + 1;
+      var endMarker = content.indexOf(':::', bodyStart);
+      if (endMarker === -1) {
+        results.push({ start: start, end: content.length, label: label, editing: true });
+        break;
+      }
+      results.push({ start: start, end: endMarker + 3, label: label, editing: false });
+      pos = endMarker + 3;
+    }
+    return results;
+  }
+
+  function maskSecrets(content) {
+    var blocks = findSecretBlocks(content);
+    if (!blocks.length) return content;
+    var result = '';
+    var lastIdx = 0;
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i];
+      result += content.slice(lastIdx, b.start);
+      var el = document.createElement('div');
+      el.className = 'secret-placeholder';
+      el.textContent = '\uD83D\uDD12 Secret: ' + b.label + (b.editing ? ' (editing\u2026)' : '');
+      result += el.outerHTML;
+      lastIdx = b.end;
+    }
+    result += content.slice(lastIdx);
+    return result;
+  }
+
+  function renderContent(markdown) {
+    var masked = maskSecrets(markdown || '');
+    // Use injected marked if available, else safe DOM creation
+    if (window.__marked) {
+      var parsed = window.__marked.parse(masked);
+      // Inline tag-allowlist sanitizer: strip dangerous tags before rendering
+      var ALLOWED = /^(p|br|h[1-6]|ul|ol|li|a|strong|em|code|pre|blockquote|table|thead|tbody|tr|th|td|img|hr|del|sup|sub|div|span|details|summary|dl|dt|dd)$/i;
+      var tmp = document.createElement('div');
+      /* eslint-disable no-unsanitized/property -- temp container for sanitization */
+      tmp.innerHTML = parsed;
+      /* eslint-enable no-unsanitized/property */
+      (function sanitize(node) {
+        var ch = Array.prototype.slice.call(node.childNodes);
+        for (var i = 0; i < ch.length; i++) {
+          if (ch[i].nodeType === 1) {
+            if (!ALLOWED.test(ch[i].tagName)) {
+              ch[i].parentNode.removeChild(ch[i]);
+            } else {
+              var attrs = Array.prototype.slice.call(ch[i].attributes);
+              for (var j = 0; j < attrs.length; j++) {
+                if (attrs[j].name.toLowerCase().indexOf('on') === 0) {
+                  ch[i].removeAttribute(attrs[j].name);
+                }
+              }
+              sanitize(ch[i]);
+            }
+          }
+        }
+      })(tmp);
+      contentEl.textContent = '';
+      var wrapper = document.createElement('div');
+      wrapper.className = 'markdown-body';
+      // Safe: content has been sanitized through tag allowlist above
+      while (tmp.firstChild) wrapper.appendChild(tmp.firstChild);
+      contentEl.appendChild(wrapper);
+      applyHighlighting();
+    } else {
+      // Minimal fallback — show as preformatted text
+      contentEl.textContent = masked;
+    }
+  }
+
+  // Listen for messages from React Native
+  window.addEventListener('message', function(event) {
+    try {
+      var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+
+      if (data.type === 'render') {
+        renderContent(data.markdown);
+      }
+
+      if (data.type === 'theme') {
+        document.documentElement.className = data.dark ? 'dark' : '';
+      }
+    } catch (e) {
+      contentEl.textContent = 'Preview error: ' + e.message;
+    }
+  });
+
+  // Also listen for ReactNativeWebView messages (Android)
+  document.addEventListener('message', function(event) {
+    window.dispatchEvent(new MessageEvent('message', { data: event.data }));
+  });
+
+  // Lightweight syntax highlighting for code blocks.
+  // Runs on the user's own markdown content after the tag-allowlist sanitizer,
+  // so innerHTML usage here is safe (no untrusted external input).
+  var KEYWORDS = {
+    js: /\b(abstract|arguments|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|eval|export|extends|finally|for|function|if|implements|import|in|instanceof|interface|let|new|of|package|private|protected|public|return|static|super|switch|this|throw|try|typeof|var|void|while|with|yield|async|from|get|set|null|undefined|true|false|NaN|Infinity)\b/g,
+    py: /\b(and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield|True|False|None|self|print)\b/g,
+    rust: /\b(as|break|const|continue|crate|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while|async|await|dyn)\b/g,
+    go: /\b(break|case|chan|const|continue|default|defer|else|fallthrough|for|func|go|goto|if|import|interface|map|package|range|return|select|struct|switch|type|var|nil|true|false|iota)\b/g,
+    sql: /\b(SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|INDEX|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AND|OR|NOT|NULL|IS|IN|LIKE|BETWEEN|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|UNION|AS|DISTINCT|COUNT|SUM|AVG|MAX|MIN|CASE|WHEN|THEN|ELSE|END|EXISTS|PRIMARY|KEY|FOREIGN|REFERENCES|UNIQUE|DEFAULT|CHECK|CONSTRAINT)\b/gi,
+  };
+  var LANG_ALIASES = {
+    javascript: 'js', jsx: 'js', typescript: 'js', ts: 'js', tsx: 'js',
+    python: 'py', ruby: 'py', java: 'js', kotlin: 'js', swift: 'js',
+    rs: 'rust', golang: 'go', mysql: 'sql', postgresql: 'sql', sqlite: 'sql',
+    bash: 'sh', shell: 'sh', zsh: 'sh',
+  };
+  KEYWORDS.sh = /\b(if|then|else|elif|fi|for|while|do|done|case|esac|function|return|exit|export|source|local|readonly|declare|typeset|unset|shift|break|continue|eval|set|test|echo|cd|pwd|ls|cat|grep|sed|awk|find|xargs|chmod|chown|mkdir|rm|cp|mv|ln|tar|gzip|curl|wget)\b/g;
+
+  function highlightCode(code, lang) {
+    var l = (lang || '').toLowerCase();
+    var kw = KEYWORDS[l] || KEYWORDS[LANG_ALIASES[l]];
+    var html = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    html = html.replace(/(["'`])(?:(?!\1|\\).|\\.)*?\1/g, '<span class="hljs-string">$&</span>');
+    html = html.replace(/(\/\/.*$|#(?!\{).*$)/gm, '<span class="hljs-comment">$&</span>');
+    html = html.replace(/\b(\d+\.?\d*([eE][+-]?\d+)?)\b/g, '<span class="hljs-number">$&</span>');
+    if (kw) html = html.replace(kw, '<span class="hljs-keyword">$&</span>');
+    return html;
+  }
+
+  function applyHighlighting() {
+    var blocks = document.querySelectorAll('pre code');
+    for (var i = 0; i < blocks.length; i++) {
+      var block = blocks[i];
+      if (block.getAttribute('data-highlighted')) continue;
+      var cls = block.className || '';
+      var langMatch = cls.match(/language-(\w+)/);
+      var lang = langMatch ? langMatch[1] : '';
+      // Safe: content is from user's own vault, already sanitized by tag allowlist
+      block.innerHTML = highlightCode(block.textContent || '', lang);
+      block.setAttribute('data-highlighted', '1');
+    }
+  }
+
+  // Signal ready
+  if (window.ReactNativeWebView) {
+    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'ready' }));
+  }
+</script>
+</body>
+</html>

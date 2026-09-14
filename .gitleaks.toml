@@ -1,0 +1,59 @@
+# Secret scanning configuration. CI runs `gitleaks detect` over every push and
+# pull request; `scripts/git-hooks/pre-commit` runs `gitleaks protect` locally.
+#
+# The allowlist below is for files that must contain credential-shaped strings
+# to do their job: tests for the write-side secret guard use the vendors' own
+# documented example values (AWS's AKIAIOSFODNN7EXAMPLE, Stripe's test key
+# from its docs) and a hand-made JWT. Nothing listed here is live.
+
+title = "Claspt"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixtures that exist to look like secrets"
+# Matched against the secret itself, not the line. Each one is a placeholder
+# shape used in tests, docs or demo data; none can be a live value.
+regexes = [
+  '''(?i)example''',
+  '''a1b2c3d4e5f6''',
+  '''test-key-20plus-characters''',
+  '''my-api-key-12345''',
+  '''stg_k3y_''',
+  '''sk-live-abc123''',
+  '''^secrets/banking$''',
+  # The Tauri updater public key: minisign public keys start with the
+  # base64 of "untrusted comment:". Public by definition.
+  '''dW50cnVzdGVkIGNvbW1lbnQ''',
+  # gitleaks also decodes that base64 and reports the key id inside it.
+  '''^C9B3746F410CE298$''',
+]
+paths = [
+  # Ignored by git and never checked in; listed so a local `gitleaks dir`
+  # run is clean, not because their contents are acceptable.
+  '''mobile/ios/Pods/''',
+  '''mobile/ios/Podfile\.lock''',
+  '''mobile/\.android-secrets/''',
+  '''server/data/''',
+  '''docs/deployment/infrastructure-reference\.md''',
+  # Build output and dependencies: not ours, and enormous. CI checks out a
+  # clean tree, so this only matters for local runs.
+  '''(^|/)node_modules/''',
+  '''(^|/)target/''',
+  '''(^|/)dist/''',
+  '''(^|/)\.git/''',
+  '''mobile/(ios|android)/build/''',
+  # Sample vault pages shipped as documentation. Values are the vendors' own
+  # documented examples (AWS, Stripe, Cloudflare) and an obviously fake key.
+  '''docs/examples/''',
+  '''src-tauri/src/pages/secret_guard\.rs''',
+  '''src-tauri/src/pages/agent_secret\.rs''',
+  '''src-tauri/src/local_api/routes\.rs''',
+  '''src-tauri/src/mcp_install\.rs''',
+  '''browser-extension/src/__tests__/.*''',
+  '''mobile/src/__tests__/.*''',
+  '''src/__tests__/.*''',
+  '''package-lock\.json''',
+  '''Cargo\.lock''',
+]

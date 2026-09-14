@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox (required for Mac App Store) -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Network: outbound connections for sync, license check, share server -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Network: local server for API/MCP (localhost only) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- File access: user-selected files/folders (vault directory picker) -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- File access: Downloads folder for exports -->
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+
+    <!-- Keychain: for biometric key storage -->
+    <key>com.apple.security.keychain</key>
+    <true/>
+
+    <!-- WebView/JIT for Tauri -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

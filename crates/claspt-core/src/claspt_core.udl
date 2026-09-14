@@ -1,0 +1,214 @@
+// UniFFI contract for the mobile (iOS/Android) apps. Every `bytes` key argument
+// is raw binary (a 32-byte master/group key unless noted); every `string`
+// path is an absolute filesystem path the app must have read/write access to.
+// Functions marked [Throws=CoreError] surface failures as the flat `CoreError`
+// enum below — treat the payload as a human-readable message, not a stable code.
+namespace claspt_core {
+    // --- Crypto: AES-256-GCM ---
+    // Encrypt one secret value under `master_key` (32 bytes). Returns base64
+    // `nonce||ciphertext||tag` (no `enc:v1:` prefix). Throws on a bad key length.
+    [Throws=CoreError]
+    string encrypt_block([ByRef] bytes master_key, string plaintext);
+
+    // Decrypt a base64 blob from `encrypt_block` under `master_key`. Throws
+    // CryptoError on a wrong key or corrupted/tampered ciphertext.
+    [Throws=CoreError]
+    string decrypt_block([ByRef] bytes master_key, string encoded);
+
+    // Generate a fresh random 32-byte master key. Throws only on RNG failure.
+    [Throws=CoreError]
+    bytes generate_master_key();
+
+    // --- Crypto: Argon2id KDF ---
+    // Stretch `password` with `salt` (≥16 bytes) into a 32-byte key. Deterministic
+    // for a given (password, salt). Memory-hard — expect ~64 MiB, tens of ms.
+    [Throws=CoreError]
+    bytes derive_key([ByRef] bytes password, [ByRef] bytes salt);
+
+    // --- Crypto: Group key ---
+    // Derive the 32-byte sync group key for (`password`, `vault_id`). Deterministic
+    // and distinct from the master key; used only for sync-bundle encryption.
+    [Throws=CoreError]
+    bytes derive_group_key([ByRef] bytes password, string vault_id);
+
+    // --- Crypto: Vault key ---
+    // Create a vault: generate a master key, wrap it under `password`, and write
+    // `vault_key_path` (0o600 on Unix; parent dir must exist). Returns the master
+    // key. Throws IoError if the path is unwritable.
+    [Throws=CoreError]
+    bytes create_vault_key(string password, string vault_key_path);
+
+    // Read `vault_key_path` and unwrap the master key with `password`. A wrong
+    // password throws CryptoError; a missing/short file throws CryptoError too.
+    [Throws=CoreError]
+    bytes unlock_vault_key(string password, string vault_key_path);
+
+    // Re-wrap the master key at `vault_key_path` from `old_password` to
+    // `new_password`. On-disk secret ciphertext is untouched. Wrong `old_password`
+    // throws CryptoError.
+    [Throws=CoreError]
+    void change_vault_password(string old_password, string new_password, string vault_key_path);
+
+    // Recover using the base64 recovery key (the raw master key) and set
+    // `new_password`. `verify_hash` = `master_key_verify` from config.json: when
+    // non-null a mismatched key is rejected before any write; when null (legacy)
+    // any valid 32-byte key is accepted after a one-shot vault.key backup.
+    [Throws=CoreError]
+    bytes recover_vault_key(string recovery_key_b64, string new_password, string vault_key_path, string? verify_hash);
+
+    // Compute the recovery-verification hash of `master_key` (hex SHA-256, 64
+    // chars). Store in config.json so recover_vault_key can reject wrong keys.
+    string compute_master_key_verify([ByRef] bytes master_key);
+
+    // --- Sync: Bundle encryption ---
+    // Encrypt a plaintext git `bundle` under the 32-byte `group_key` into a
+    // CSYNC1 envelope. `device_id` origin-stamps the header (first 8 bytes used;
+    // pass "" to omit). The header is authenticated, so origin cannot be spoofed.
+    [Throws=CoreError]
+    bytes encrypt_sync_bundle([ByRef] bytes group_key, [ByRef] bytes bundle, BundleType bundle_type, string device_id);
+
+    // Decrypt an envelope under `group_key`, returning the plaintext bundle,
+    // its type, and the sender's device prefix. Throws CryptoError on a wrong key
+    // or a tampered header/ciphertext.
+    [Throws=CoreError]
+    DecryptedBundle decrypt_sync_bundle([ByRef] bytes group_key, [ByRef] bytes encrypted);
+
+    // --- Git operations ---
+    // Apply a decrypted git bundle to the repo at `vault_dir` (must be an existing
+    // git repo). See ApplyResult for the fast-forward vs needs-merge outcome.
+    [Throws=CoreError]
+    ApplyResult apply_git_bundle(string vault_dir, [ByRef] bytes bundle_data);
+
+    // Build a plaintext git bundle of commits since `since_oid` (40-char hex; null
+    // = full history). Returns empty bytes when already up-to-date. Encrypt before
+    // transport with encrypt_sync_bundle.
+    [Throws=CoreError]
+    bytes create_incremental_git_bundle(string vault_dir, string? since_oid);
+
+    // Build a plaintext full-history git bundle of the repo at `vault_dir` (first
+    // sync / snapshot recovery). Encrypt before transport.
+    [Throws=CoreError]
+    bytes create_snapshot_git_bundle(string vault_dir);
+
+    // Stage all changes in `vault_dir` and auto-commit with a message derived from
+    // `message`. CommitResult.oid is empty when there was nothing to commit.
+    [Throws=CoreError]
+    CommitResult commit_vault_changes(string vault_dir, string message);
+
+    // Return the current HEAD OID (40-char hex) of `vault_dir`, or null for an
+    // empty repo with no commits yet.
+    [Throws=CoreError]
+    string? get_head_oid(string vault_dir);
+
+    // Initialize a git repo at `vault_dir` (creating the dir if needed). Safe to
+    // call on an already-initialized repo.
+    [Throws=CoreError]
+    void init_git_repo(string vault_dir);
+
+    // --- Secret blocks ---
+    // Encrypt every plaintext `:::secret[...]` block in `markdown` under
+    // `master_key`, returning markdown with each body replaced by an enc:v1: blob.
+    // Already-encrypted or code-fenced blocks are left untouched.
+    [Throws=CoreError]
+    string encrypt_page_secrets([ByRef] bytes master_key, string markdown);
+
+    // Decrypt every enc:v1: secret block in `markdown` back to plaintext.
+    // Plaintext or code-fenced blocks are left untouched. Throws on a wrong key.
+    [Throws=CoreError]
+    string decrypt_page_secrets([ByRef] bytes master_key, string markdown);
+
+    // Encrypt an entire page `content` as one enc:v1: blob (fully-encrypted page).
+    [Throws=CoreError]
+    string encrypt_full_body([ByRef] bytes master_key, string content);
+
+    // Decrypt a full-body enc:v1: page from encrypt_full_body. Throws CryptoError
+    // if `content` is not full-body encrypted or the key is wrong.
+    [Throws=CoreError]
+    string decrypt_full_body([ByRef] bytes master_key, string content);
+
+    // True if `content` has at least one real `:::secret[...]` block (ignoring
+    // code fences). No key required; never throws.
+    boolean has_secret_blocks(string content);
+
+    // Return the plaintext labels of all secret blocks in `content`, in document
+    // order, for search indexing. Labels are readable regardless of encryption.
+    sequence<string> extract_secret_labels(string content);
+
+    // --- Git history ---
+    // Return up to `max_count` commits that changed `rel_path` (relative to the
+    // vault root) in the repo at `vault_dir`, newest first.
+    [Throws=CoreError]
+    sequence<GitCommitEntry> get_file_log(string vault_dir, string rel_path, u32 max_count);
+
+    // Return the content of `rel_path` at commit `oid` (40-char hex), or null if
+    // the file did not exist at that commit. Throws on an invalid OID.
+    [Throws=CoreError]
+    string? get_file_at_commit(string vault_dir, string oid, string rel_path);
+
+    // Return the before/after content of `rel_path` at commit `oid` vs its parent
+    // (for the version diff viewer). Throws on an invalid OID.
+    [Throws=CoreError]
+    GitCommitDiff get_commit_diff(string vault_dir, string oid, string rel_path);
+};
+
+// Flat error surfaced across the FFI boundary. The payload is a human-readable
+// message; the variant is the only machine-stable part. CryptoError commonly
+// means a wrong password or corrupted ciphertext; InvalidData means malformed
+// input (bad frontmatter, bad base64, etc.).
+[Error]
+enum CoreError {
+    "CryptoError",
+    "GitError",
+    "SyncError",
+    "IoError",
+    "InvalidData",
+};
+
+// Which kind of sync bundle a payload carries: Incremental (commits since a
+// baseline; the common case) or Snapshot (full history; first sync / recovery).
+enum BundleType {
+    "Incremental",
+    "Snapshot",
+};
+
+// Plaintext result of decrypting a sync bundle: the git bundle bytes ready for
+// apply_git_bundle, its type, and the sender's device prefix (null if none).
+dictionary DecryptedBundle {
+    bytes data;
+    BundleType bundle_type;
+    string? device_prefix;
+};
+
+// Outcome of applying a bundle: how many commits landed, whether the caller must
+// run a real merge (needs_merge), and human-readable conflict reasons.
+dictionary ApplyResult {
+    u32 commits_applied;
+    boolean needs_merge;
+    sequence<string> conflicts;
+};
+
+// Result of an auto-commit: the new commit OID (empty if nothing changed) and
+// the message that was recorded.
+dictionary CommitResult {
+    string oid;
+    string message;
+};
+
+// One entry in a file's or vault's commit history. `timestamp_secs` is Unix
+// epoch seconds (UTC).
+dictionary GitCommitEntry {
+    string oid;
+    string message;
+    i64 timestamp_secs;
+};
+
+// A single file's before/after contents at one commit, for version diffs.
+// `timestamp_secs` is Unix epoch seconds (UTC); a null content side means the
+// file was created (parent null) or deleted (current null) at this commit.
+dictionary GitCommitDiff {
+    string oid;
+    string message;
+    i64 timestamp_secs;
+    string? parent_content;
+    string? current_content;
+};

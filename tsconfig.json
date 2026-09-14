@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+
+    /* Path aliases */
+    "baseUrl": ".",
+    "paths": {
+      "@/stores/sync-store": ["src/stores/sync-store.ts", "src/pro-stubs/stores/sync-store.ts"],
+      "@/stores/share-store": ["src/stores/share-store.ts", "src/pro-stubs/stores/share-store.ts"],
+      "@/components/SyncStatusBar": ["src/components/SyncStatusBar.tsx", "src/pro-stubs/components/SyncStatusBar.tsx"],
+      "@/components/RestoreFromAccount": ["src/components/RestoreFromAccount.tsx", "src/pro-stubs/components/RestoreFromAccount.tsx"],
+      "@/components/ConflictModal": ["src/components/ConflictModal.tsx", "src/pro-stubs/components/ConflictModal.tsx"],
+      "@/components/ShareBadge": ["src/components/ShareBadge.tsx", "src/pro-stubs/components/ShareBadge.tsx"],
+      "@/components/ShareModal": ["src/components/ShareModal.tsx", "src/pro-stubs/components/ShareModal.tsx"],
+      "@/components/settings/LicensesTab": ["src/components/settings/LicensesTab.tsx", "src/pro-stubs/components/settings/LicensesTab.tsx"],
+      "@/components/settings/IncomingShares": ["src/components/settings/IncomingShares.tsx", "src/pro-stubs/components/settings/IncomingShares.tsx"],
+      "@/*": ["src/*"],
+      "@claspt/shared": ["shared/src/index.ts"],
+      "@claspt/shared/*": ["shared/src/*"]
+    }
+  },
+  "include": ["src", "shared"]
+}

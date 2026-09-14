@@ -1,0 +1,24 @@
+{
+  "name": "@claspt/sdk",
+  "version": "0.1.0",
+  "description": "Client for the Claspt local API: encrypted secrets and project memory for AI agents.",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Indivar Software Solutions Limited",
+  "homepage": "https://claspt.app",
+  "repository": { "type": "git", "url": "https://github.com/Indivar/claspt-apps", "directory": "sdks/typescript" },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

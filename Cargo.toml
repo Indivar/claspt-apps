@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/claspt-core", "src-tauri"]
+resolver = "2"
+
+[profile.dev]
+opt-level = 0
+
+# RSA key generation and signing at opt-level 0 take minutes; the SSH agent
+# tests generate keys. Optimising just the big-number crates keeps debug
+# builds of everything else as they are.
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"

@@ -1,0 +1,11 @@
+{
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
+    }
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false
+  }
+}

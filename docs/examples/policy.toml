@@ -1,0 +1,26 @@
+# Claspt serve policy. Deny by default: a request is allowed only when a rule
+# names the client, the action and the target. Copy to
+# <vault>/.securenotes/policy.toml or pass --policy.
+#
+# client:  a client name from `claspt tokens list`, its id, or "*".
+# actions: access-log action names ("secret.read", "memory.write", ...);
+#          "memory.*" and "*" are globs.
+# targets: the page path for page and secret routes, "memory/<namespace>"
+#          for memory routes, "ssh.sign" targets are page paths too, and the
+#          request path for everything else. "*" matches anything.
+
+[[rule]]
+client = "CI runner"
+actions = ["status", "secret.list", "secret.read"]
+targets = ["/api/status", "/api/secrets", "credentials/deploy/*"]
+
+[[rule]]
+client = "Claude Code on build-box"
+actions = ["status", "memory.*"]
+targets = ["/api/status", "memory/website", "memory/global"]
+
+# The SSH agent asks as client "ssh-agent" with action "ssh.sign".
+[[rule]]
+client = "ssh-agent"
+actions = ["ssh.sign"]
+targets = ["ai/ssh-keys.md"]

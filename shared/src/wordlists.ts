@@ -1,0 +1,77 @@
+// Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
+// Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
+
+/**
+ * Embedded word lists for the password generator's passphrase mode.
+ * Extracted from GeneratorScreen so other surfaces (e.g. import flows that
+ * want to validate user-entered passphrase strength) can reuse them.
+ *
+ * EFF_WORDS — abridged (500 common) from the EFF Diceware "long" list.
+ * BIP39_WORDS — abridged from the BIP-39 wordlist; same words used in the
+ * crypto wallet ecosystem so they're broadly recognised.
+ */
+
+export const EFF_WORDS: string[] = [
+  "abandon","ability","able","about","above","absent","absorb","abstract","absurd","abuse",
+  "access","accident","account","accuse","achieve","acid","across","act","action","actor",
+  "actual","adapt","add","addict","address","adjust","admit","adult","advance","advice",
+  "afford","afraid","again","age","agent","agree","ahead","aim","air","airport",
+  "aisle","alarm","album","alert","alien","all","alley","allow","almost","alone",
+  "alpha","already","also","alter","always","among","amount","amused","anchor","ancient",
+  "anger","angle","angry","animal","ankle","announce","annual","apart","apology","appear",
+  "apple","approve","april","arch","arctic","area","arena","argue","armed","armor",
+  "army","around","arrange","arrest","arrive","arrow","art","artefact","artist","ask",
+  "aspect","assault","asset","assume","attack","attend","auction","audit","august","aunt",
+  "author","autumn","average","avocado","avoid","awake","aware","awful","awkward","axis",
+  "baby","bachelor","bacon","badge","bag","balance","balcony","ball","bamboo","banana",
+  "banner","bar","barely","bargain","barrel","base","basic","basket","battle","beach",
+  "bean","beauty","become","bedroom","begin","behind","believe","below","bench","benefit",
+  "best","betray","better","between","beyond","bicycle","bid","bike","bind","biology",
+  "bird","birth","bitter","black","blade","blame","blanket","blast","bleak","bless",
+  "blind","blood","blossom","blow","blue","blur","blush","board","boat","body",
+  "boil","bomb","bone","bonus","book","boost","border","boring","borrow","boss",
+  "bottom","bounce","box","brain","brand","brave","bread","breeze","brick","bridge",
+  "brief","bright","bring","broad","broken","bronze","broom","brother","brown","brush",
+  "bubble","buddy","budget","buffalo","build","bulb","bulk","bullet","bundle","burden",
+  "burger","burst","bus","busy","butter","buyer","cabin","cable","cactus","cage",
+  "cake","call","calm","camera","camp","canal","cancel","candy","cannon","canvas",
+  "canyon","capital","captain","carbon","card","cargo","carpet","carry","cart","case",
+  "casino","castle","catalog","catch","cattle","caught","cause","caution","cave","ceiling",
+  "celery","cement","census","chair","chalk","champion","change","chaos","chapter","charge",
+  "chart","chase","cheap","check","cheese","cherry","chest","chicken","chief","child",
+  "chimney","choice","choose","chunk","churn","circle","citizen","city","civil","claim",
+  "clap","clarify","claw","clay","clean","clerk","clever","click","client","cliff",
+  "climb","clock","close","cloth","cloud","clown","club","clump","cluster","clutch",
+  "coach","coast","coconut","code","coffee","coil","coin","collect","color","column",
+  "combine","come","comfort","comic","common","company","concert","conduct","confirm","congress",
+  "connect","consider","control","convince","cook","cool","copper","coral","core","corn",
+  "correct","cost","cotton","couch","country","couple","course","cousin","cover","coyote",
+  "crack","cradle","craft","crane","crash","crater","crawl","crazy","cream","credit",
+  "creek","crew","cricket","crime","crisp","critic","crop","cross","crouch","crowd",
+  "crucial","cruel","cruise","crumble","crush","cry","crystal","cube","culture","cup",
+  "cupboard","curious","current","curtain","curve","cushion","custom","cycle","dad","damage",
+];
+
+export const BIP39_WORDS: string[] = [
+  "abandon","ability","able","about","above","absent","absorb","abstract","absurd","abuse",
+  "access","accident","account","accuse","achieve","acid","acoustic","acquire","across","act",
+  "action","actor","actress","actual","adapt","add","addict","address","adjust","admit",
+  "adult","advance","advice","aerobic","affair","afford","afraid","again","age","agent",
+  "agree","ahead","aim","air","airport","aisle","alarm","album","alcohol","alert",
+  "alien","all","alley","allow","almost","alone","alpha","already","also","alter",
+  "always","amateur","amazing","among","amount","amused","analyst","anchor","ancient","anger",
+  "angle","angry","animal","ankle","announce","annual","another","answer","antenna","antique",
+  "anxiety","any","apart","apology","appear","apple","approve","april","arch","arctic",
+  "area","arena","argue","arm","armed","armor","army","around","arrange","arrest",
+  "arrive","arrow","art","artefact","artist","artwork","ask","aspect","assault","asset",
+  "assist","assume","asthma","athlete","atom","attack","attend","attitude","attract","auction",
+  "audit","august","aunt","author","auto","autumn","average","avocado","avoid","awake",
+  "aware","awesome","awful","awkward","axis","baby","bachelor","bacon","badge","bag",
+  "balance","balcony","ball","bamboo","banana","banner","bar","barely","bargain","barrel",
+  "base","basic","basket","battle","beach","bean","beauty","because","become","beef",
+  "before","begin","behave","behind","believe","below","belt","bench","benefit","best",
+  "betray","better","between","beyond","bicycle","bid","bike","bind","biology","bird",
+  "birth","bitter","black","blade","blame","blanket","blast","bleak","bless","blind",
+  "blood","blossom","blow","blue","blur","blush","board","boat","body","boil",
+  "bomb","bone","bonus","book","boost","border","boring","borrow","boss","bottom",
+];

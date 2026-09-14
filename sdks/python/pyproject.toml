@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claspt"
+version = "0.1.0"
+description = "Client for the Claspt local API: encrypted secrets and project memory for AI agents."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "PolyForm-Shield-1.0.0" }
+authors = [{ name = "Indivar Software Solutions Limited" }]
+keywords = ["claspt", "secrets", "memory", "agents", "mcp"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Topic :: Security",
+]
+dependencies = []
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.2"]
+openai-agents = ["openai-agents>=0.0.10"]
+crewai = ["crewai>=0.30"]
+
+[project.urls]
+Homepage = "https://claspt.app"
+Source = "https://github.com/Indivar/claspt-apps"
+
+[tool.setuptools.packages.find]
+where = ["src"]

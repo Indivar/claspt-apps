@@ -1,0 +1,29 @@
+#!/bin/sh
+# Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
+# Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
+#
+# Two refusals before a commit lands:
+#   1. a commit that mixes public and private paths (see .publicignore), which
+#      could never be cherry-picked whole into the public repository;
+#   2. anything staged that looks like a credential.
+#
+# Enable once per clone:   git config core.hooksPath scripts/git-hooks
+# Needs gitleaks on PATH:  https://github.com/gitleaks/gitleaks#installing
+#
+# Fails closed on purpose. Someone who has opted into this hook wants the
+# checks to run; a missing scanner must not turn into a silent pass. CI runs
+# the same scans, so nothing slips through either way.
+
+# The boundary guard is private tooling and is absent in the public
+# repository, where every path is public by definition and there is nothing
+# to mix. Its absence is expected there, not a failure.
+if [ -f scripts/check-public-boundary.mjs ]; then
+  node scripts/check-public-boundary.mjs || exit 1
+fi
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed; install it or unset core.hooksPath" >&2
+  exit 1
+fi
+
+exec gitleaks protect --staged --redact --config .gitleaks.toml
