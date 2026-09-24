@@ -395,11 +395,7 @@ where
     {
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
-            let rel_path = path
-                .strip_prefix(vault_dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
+            let rel_path = super::slash_path(path.strip_prefix(vault_dir).unwrap_or(path));
 
             if let Ok(raw) = std::fs::read_to_string(path) {
                 if let Ok((meta, content)) = model::parse_page(&raw) {
@@ -551,11 +547,7 @@ fn collect_folders_recursive(
         if path.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
             if !name.starts_with('.') && name != "_media" {
-                let rel = path
-                    .strip_prefix(vault_dir)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .to_string();
+                let rel = super::slash_path(path.strip_prefix(vault_dir).unwrap_or(&path));
                 folders.push(rel);
                 collect_folders_recursive(vault_dir, &path, folders)?;
             }
@@ -612,7 +604,7 @@ pub fn rename_folder(vault_dir: &Path, old_name: &str, new_name: &str) -> Result
             if let Ok(raw) = std::fs::read_to_string(path) {
                 if let Ok((mut meta, content)) = model::parse_page(&raw) {
                     if let Ok(rel) = path.parent().unwrap_or(path).strip_prefix(vault_dir) {
-                        meta.folder = rel.to_string_lossy().to_string();
+                        meta.folder = super::slash_path(rel);
                         if let Ok(new_raw) = model::serialize_page(&meta, &content) {
                             let _ = atomic_write(path, new_raw.as_bytes());
                         }
@@ -655,7 +647,7 @@ pub fn delete_folder(vault_dir: &Path, name: &str, action: &str) -> Result<(), P
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
             if let Ok(rel) = path.strip_prefix(vault_dir) {
-                page_paths.push(rel.to_string_lossy().to_string());
+                page_paths.push(super::slash_path(rel));
             }
         }
     }

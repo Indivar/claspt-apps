@@ -66,11 +66,7 @@ where
     {
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
-            let rel_path = path
-                .strip_prefix(vault_dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
+            let rel_path = super::slash_path(path.strip_prefix(vault_dir).unwrap_or(path));
             if let Ok(raw) = std::fs::read_to_string(path) {
                 if let Ok((meta, content)) = parse_page(&raw) {
                     visitor(rel_path, meta, content);

@@ -1,6 +1,6 @@
 [package]
 name = "claspt"
-version = "4.1.0"
+version = "4.1.1"
 description = "Cross-platform personal notes vault with encrypted secret storage"
 authors = ["Indivar Software Solutions Limited"]
 license = "PolyForm-Shield-1.0.0"

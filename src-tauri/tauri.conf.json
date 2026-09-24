@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Claspt",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "identifier": "in.indivar.claspt",
   "build": {
     "frontendDist": "../dist",

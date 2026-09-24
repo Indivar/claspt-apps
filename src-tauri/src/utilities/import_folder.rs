@@ -87,7 +87,7 @@ pub fn import_folder(
         // Preserve subfolder structure: compute relative path from source root
         let page_folder = if let Ok(rel) = md_path.parent().unwrap_or(&source).strip_prefix(&source)
         {
-            let rel_str = rel.to_string_lossy().to_string();
+            let rel_str = crate::pages::slash_path(rel);
             if rel_str.is_empty() {
                 target_folder.to_string()
             } else {

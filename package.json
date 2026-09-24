@@ -1,7 +1,7 @@
 {
   "name": "claspt",
   "private": true,
-  "version": "4.1.0",
+  "version": "4.1.1",
   "license": "PolyForm-Shield-1.0.0",
   "type": "module",
   "workspaces": [
