@@ -14,6 +14,7 @@ import * as cmd from "@/lib/commands";
 import { SpinnerIcon } from "@/components/ui/icons";
 import { errorMessage } from "@/lib/error-message";
 import { usePagesStore } from "@/stores/pages-store";
+import { SECRET_INPUT_PROPS } from "@/lib/secret-input";
 
 type ExportState =
   | { status: "idle" }
@@ -182,6 +183,7 @@ export function ExportTab() {
               {usePassword && (
                 <input
                   type="password"
+                  {...SECRET_INPUT_PROPS}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Enter export password"
@@ -322,6 +324,7 @@ export function ExportTab() {
                 </label>
                 <input
                   type="password"
+                  {...SECRET_INPUT_PROPS}
                   value={zipPassword}
                   onChange={(e) => setZipPassword(e.target.value)}
                   placeholder="Leave empty if not encrypted"

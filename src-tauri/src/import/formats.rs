@@ -548,117 +548,201 @@ pub fn parse_keepass(file_path: &Path) -> Result<Vec<ImportEntry>, ImportError> 
     Ok(entries)
 }
 
+/// KeePass 2 XML export.
+///
+/// This was a line scanner that matched `<Value>` and `</Value>` on one line.
+/// KeePass writes the password as `<Value ProtectInMemory="True">`, which the
+/// scanner never matched, so every imported login arrived without its
+/// password; a multi-line Notes field lost every line but the first; `&amp;`
+/// stayed `&amp;`; and the old versions KeePass keeps under `<History>` were
+/// imported as if they were current. It is parsed as XML now.
 fn parse_keepass_xml(
     xml: &str,
     _default_folder: &str,
     entries: &mut Vec<ImportEntry>,
 ) -> Result<(), ImportError> {
-    // Simple line-by-line XML parser for KeePass XML structure:
-    // <Root><Group><Name>...</Name><Entry><String><Key>...</Key><Value>...</Value></String>...</Entry></Group></Root>
-    let mut current_group = "imported".to_string();
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    let mut path: Vec<String> = Vec::new();
+    let mut groups: Vec<String> = Vec::new();
+    let mut history_depth = 0usize;
     let mut in_entry = false;
-    let mut in_string = false;
-    let mut current_key = String::new();
-    let mut current_value = String::new();
     let mut entry_fields: Vec<(String, String)> = Vec::new();
+    let mut key = String::new();
+    let mut value = String::new();
+    let mut text = String::new();
 
-    for line in xml.lines() {
-        let trimmed = line.trim();
-
-        // Track group names
-        if trimmed.starts_with("<Name>") && !in_entry {
-            if let Some(name) = extract_tag_value(trimmed, "Name") {
-                if !name.is_empty() && name != "Root" && name != "Recycle Bin" {
-                    current_group = sanitize_folder(&name);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name().as_ref().to_owned();
+                match name.as_str() {
+                    "History" => history_depth += 1,
+                    "Group" if history_depth == 0 => groups.push(String::new()),
+                    "Entry" if history_depth == 0 => {
+                        in_entry = true;
+                        entry_fields.clear();
+                    }
+                    "String" if in_entry && history_depth == 0 => {
+                        key.clear();
+                        value.clear();
+                    }
+                    _ => {}
+                }
+                path.push(name);
+                text.clear();
+            }
+            Ok(Event::Empty(e)) => {
+                // `<Value/>`: an empty field, which is still a field.
+                let name = e.name().as_ref().to_owned();
+                if in_entry && history_depth == 0 && name == "Value" {
+                    value.clear();
                 }
             }
-        }
-
-        if trimmed == "<Entry>" {
-            in_entry = true;
-            entry_fields.clear();
-        } else if trimmed == "</Entry>" {
-            in_entry = false;
-            // Convert fields to ImportEntry
-            let mut title = String::new();
-            let mut notes = String::new();
-            let mut fields = Vec::new();
-
-            for (key, value) in &entry_fields {
-                match key.as_str() {
-                    "Title" => title = value.clone(),
-                    "Notes" => notes = value.clone(),
-                    "URL" | "UserName" | "Password" => {
-                        if !value.is_empty() {
-                            let display_key = match key.as_str() {
-                                "UserName" => "Username",
-                                k => k,
-                            };
-                            fields.push(ImportField {
-                                key: display_key.to_string(),
-                                value: value.clone(),
-                            });
+            Ok(Event::Text(t)) => {
+                // quick-xml 0.38+ resolves character and predefined entity
+                // references while reading, so the text arrives unescaped;
+                // `xml_content` decodes it and normalises line ends. KeePass
+                // writes XML 1.0 and declares it.
+                text.push_str(&t.xml_content(quick_xml::XmlVersion::Explicit1_0));
+            }
+            Ok(Event::GeneralRef(r)) => {
+                // quick-xml 0.41 hands every reference back as an event rather
+                // than expanding it in the text. Character references and the
+                // five predefined entities are what a KeePass export contains
+                // (`&amp;` in a password, `&lt;` in a note); anything else is
+                // kept as written rather than dropped.
+                if let Some(c) = r
+                    .resolve_char_ref()
+                    .map_err(|e| ImportError::from(quick_xml::DeError::from(e)))?
+                {
+                    text.push(c);
+                    continue;
+                }
+                let name = r.into_inner();
+                match name.as_ref() {
+                    "amp" => text.push('&'),
+                    "lt" => text.push('<'),
+                    "gt" => text.push('>'),
+                    "quot" => text.push('"'),
+                    "apos" => text.push('\''),
+                    other => {
+                        text.push('&');
+                        text.push_str(other);
+                        text.push(';');
+                    }
+                }
+            }
+            Ok(Event::CData(c)) => {
+                text.push_str(&c.into_inner());
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name().as_ref().to_owned();
+                let parent = path
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|i| path.get(i))
+                    .cloned()
+                    .unwrap_or_default();
+                match name.as_str() {
+                    "History" => history_depth = history_depth.saturating_sub(1),
+                    "Name" if parent == "Group" && history_depth == 0 && !in_entry => {
+                        if let Some(group) = groups.last_mut() {
+                            *group = text.trim().to_string();
                         }
                     }
-                    _ => {
-                        if !value.is_empty() {
-                            fields.push(ImportField {
-                                key: key.clone(),
-                                value: value.clone(),
-                            });
+                    "Key" if in_entry && history_depth == 0 && parent == "String" => {
+                        key = text.clone()
+                    }
+                    "Value" if in_entry && history_depth == 0 && parent == "String" => {
+                        value = text.clone()
+                    }
+                    "String" if in_entry && history_depth == 0 => {
+                        entry_fields.push((key.clone(), value.clone()))
+                    }
+                    "Entry" if in_entry && history_depth == 0 => {
+                        in_entry = false;
+                        if !groups.iter().any(|g| g == "Recycle Bin") {
+                            push_keepass_entry(&entry_fields, &keepass_folder(&groups), entries);
                         }
                     }
+                    "Group" if history_depth == 0 => {
+                        groups.pop();
+                    }
+                    _ => {}
                 }
+                path.pop();
+                text.clear();
             }
-
-            if !fields.is_empty() || !notes.is_empty() {
-                entries.push(ImportEntry {
-                    title: if title.is_empty() {
-                        "Untitled".to_string()
-                    } else {
-                        title
-                    },
-                    folder: current_group.clone(),
-                    fields,
-                    notes,
-                });
-            }
-        }
-
-        if in_entry {
-            if trimmed == "<String>" {
-                in_string = true;
-                current_key.clear();
-                current_value.clear();
-            } else if trimmed == "</String>" {
-                in_string = false;
-                entry_fields.push((current_key.clone(), current_value.clone()));
-            } else if in_string {
-                if let Some(key) = extract_tag_value(trimmed, "Key") {
-                    current_key = key;
-                }
-                if let Some(value) = extract_tag_value(trimmed, "Value") {
-                    current_value = value;
-                }
-            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(ImportError::from(quick_xml::DeError::from(e))),
+            _ => {}
         }
     }
-
     Ok(())
 }
 
-fn extract_tag_value(line: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
-    if let Some(start) = line.find(&open) {
-        if let Some(end) = line.find(&close) {
-            let value_start = start + open.len();
-            if value_start <= end {
-                return Some(line[value_start..end].to_string());
+/// The innermost named group, as a folder; "Root" is KeePass's own name for
+/// the top and says nothing about the entry.
+fn keepass_folder(groups: &[String]) -> String {
+    groups
+        .iter()
+        .rev()
+        .find(|g| !g.is_empty() && *g != "Root")
+        .map(|g| sanitize_folder(g))
+        .unwrap_or_else(|| "imported".to_string())
+}
+
+fn push_keepass_entry(
+    entry_fields: &[(String, String)],
+    folder: &str,
+    entries: &mut Vec<ImportEntry>,
+) {
+    let mut title = String::new();
+    let mut notes = String::new();
+    let mut fields = Vec::new();
+
+    for (key, value) in entry_fields {
+        match key.as_str() {
+            "Title" => title = value.clone(),
+            "Notes" => notes = value.clone(),
+            "URL" | "UserName" | "Password" => {
+                if !value.is_empty() {
+                    let display_key = match key.as_str() {
+                        "UserName" => "Username",
+                        k => k,
+                    };
+                    fields.push(ImportField {
+                        key: display_key.to_string(),
+                        value: value.clone(),
+                    });
+                }
+            }
+            _ => {
+                if !value.is_empty() {
+                    fields.push(ImportField {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                }
             }
         }
     }
-    None
+
+    if !fields.is_empty() || !notes.is_empty() {
+        entries.push(ImportEntry {
+            title: if title.is_empty() {
+                "Untitled".to_string()
+            } else {
+                title
+            },
+            folder: folder.to_string(),
+            fields,
+            notes,
+        });
+    }
 }
 
 /// Clean up folder names from imports.
@@ -1469,5 +1553,61 @@ mod tests {
                 "title {title:?} forced the password onto disk in plaintext:\n{encrypted}"
             );
         }
+    }
+
+    #[test]
+    fn keepass_xml_is_parsed_as_xml() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<KeePassFile><Root><Group><Name>Root</Name>
+  <Group><Name>Work</Name>
+    <Entry>
+      <String><Key>Title</Key><Value>Mail</Value></String>
+      <String><Key>UserName</Key><Value>me@example.com</Value></String>
+      <String><Key>Password</Key><Value ProtectInMemory="True">p&amp;ss&lt;1&gt;</Value></String>
+      <String><Key>URL</Key><Value/></String>
+      <String><Key>Notes</Key><Value>recovery codes:
+1111-2222
+3333-4444</Value></String>
+      <History>
+        <Entry>
+          <String><Key>Title</Key><Value>Mail (old)</Value></String>
+          <String><Key>Password</Key><Value ProtectInMemory="True">old</Value></String>
+        </Entry>
+      </History>
+    </Entry>
+  </Group>
+  <Group><Name>Recycle Bin</Name>
+    <Entry><String><Key>Title</Key><Value>Deleted</Value></String><String><Key>Password</Key><Value>x</Value></String></Entry>
+  </Group>
+</Group></Root></KeePassFile>"#;
+        let mut entries = Vec::new();
+        parse_keepass_xml(xml, "imported", &mut entries).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "history and recycle bin must not import: {entries:?}"
+        );
+        let e = &entries[0];
+        assert_eq!(e.title, "Mail");
+        assert_eq!(e.folder, sanitize_folder("Work"));
+        let field = |k: &str| {
+            e.fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.as_str())
+        };
+        assert_eq!(
+            field("Password"),
+            Some("p&ss<1>"),
+            "protected value with entities"
+        );
+        assert_eq!(field("Username"), Some("me@example.com"));
+        assert_eq!(field("URL"), None, "an empty value is not a field");
+        assert_eq!(
+            e.notes.lines().count(),
+            3,
+            "multi-line notes: {:?}",
+            e.notes
+        );
     }
 }

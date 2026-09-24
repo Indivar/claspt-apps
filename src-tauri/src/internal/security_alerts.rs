@@ -63,39 +63,45 @@ impl SecurityAlert {
 }
 
 /// Add a security alert.
-pub fn add_alert(vault_dir: &Path, alert: &SecurityAlert) -> std::io::Result<()> {
-    InternalStore::append(vault_dir, ALERTS_FILE, alert, MAX_ALERTS)
+pub fn add_alert(
+    vault_dir: &Path,
+    master_key: &[u8],
+    alert: &SecurityAlert,
+) -> std::io::Result<()> {
+    InternalStore::append_sealed(vault_dir, ALERTS_FILE, alert, MAX_ALERTS, master_key)
 }
 
 /// Get all security alerts.
-pub fn get_alerts(vault_dir: &Path) -> Vec<SecurityAlert> {
-    InternalStore::read(vault_dir, ALERTS_FILE)
+pub fn get_alerts(vault_dir: &Path, master_key: &[u8]) -> Vec<SecurityAlert> {
+    InternalStore::read_sealed(vault_dir, ALERTS_FILE, master_key)
 }
 
 /// Get active (not dismissed, not resolved) alerts.
-pub fn get_active_alerts(vault_dir: &Path) -> Vec<SecurityAlert> {
-    get_alerts(vault_dir)
+pub fn get_active_alerts(vault_dir: &Path, master_key: &[u8]) -> Vec<SecurityAlert> {
+    get_alerts(vault_dir, master_key)
         .into_iter()
         .filter(|a| !a.dismissed && !a.resolved)
         .collect()
 }
 
 /// Dismiss an alert.
-pub fn dismiss_alert(vault_dir: &Path, alert_id: &str) -> std::io::Result<()> {
-    let mut alerts: Vec<SecurityAlert> = InternalStore::read(vault_dir, ALERTS_FILE);
+pub fn dismiss_alert(vault_dir: &Path, master_key: &[u8], alert_id: &str) -> std::io::Result<()> {
+    let mut alerts: Vec<SecurityAlert> =
+        InternalStore::read_sealed(vault_dir, ALERTS_FILE, master_key);
     if let Some(alert) = alerts.iter_mut().find(|a| a.id == alert_id) {
         alert.dismissed = true;
     }
-    InternalStore::write(vault_dir, ALERTS_FILE, &alerts)
+    InternalStore::write_sealed(vault_dir, ALERTS_FILE, &alerts, master_key)
 }
 
 /// Mark an alert as resolved.
-pub fn resolve_alert(vault_dir: &Path, alert_id: &str) -> std::io::Result<()> {
-    let mut alerts: Vec<SecurityAlert> = InternalStore::read(vault_dir, ALERTS_FILE);
+pub fn resolve_alert(vault_dir: &Path, master_key: &[u8], alert_id: &str) -> std::io::Result<()> {
+    let mut alerts: Vec<SecurityAlert> =
+        InternalStore::read_sealed(vault_dir, ALERTS_FILE, master_key);
     if let Some(alert) = alerts.iter_mut().find(|a| a.id == alert_id) {
         alert.resolved = true;
     }
-    InternalStore::write(vault_dir, ALERTS_FILE, &alerts)
+    InternalStore::write_sealed(vault_dir, ALERTS_FILE, &alerts, master_key)
 }
 
 // ── Password Health History ──────────────────────
@@ -132,25 +138,29 @@ pub struct PasswordHealthHistory {
 /// Save a new health scan snapshot.
 pub fn save_health_snapshot(
     vault_dir: &Path,
+    master_key: &[u8],
     snapshot: &PasswordHealthSnapshot,
 ) -> std::io::Result<()> {
-    let mut history: PasswordHealthHistory = InternalStore::read(vault_dir, HEALTH_FILE);
+    let mut history: PasswordHealthHistory =
+        InternalStore::read_sealed(vault_dir, HEALTH_FILE, master_key);
     history.snapshots.push(snapshot.clone());
     // Keep last 100 snapshots
     if history.snapshots.len() > 100 {
         history.snapshots = history.snapshots.split_off(history.snapshots.len() - 100);
     }
-    InternalStore::write(vault_dir, HEALTH_FILE, &history)
+    InternalStore::write_sealed(vault_dir, HEALTH_FILE, &history, master_key)
 }
 
 /// Get password health history.
-pub fn get_health_history(vault_dir: &Path) -> Vec<PasswordHealthSnapshot> {
-    let history: PasswordHealthHistory = InternalStore::read(vault_dir, HEALTH_FILE);
+pub fn get_health_history(vault_dir: &Path, master_key: &[u8]) -> Vec<PasswordHealthSnapshot> {
+    let history: PasswordHealthHistory =
+        InternalStore::read_sealed(vault_dir, HEALTH_FILE, master_key);
     history.snapshots
 }
 
 /// Get the latest health snapshot.
-pub fn get_latest_health(vault_dir: &Path) -> Option<PasswordHealthSnapshot> {
-    let history: PasswordHealthHistory = InternalStore::read(vault_dir, HEALTH_FILE);
+pub fn get_latest_health(vault_dir: &Path, master_key: &[u8]) -> Option<PasswordHealthSnapshot> {
+    let history: PasswordHealthHistory =
+        InternalStore::read_sealed(vault_dir, HEALTH_FILE, master_key);
     history.snapshots.last().cloned()
 }

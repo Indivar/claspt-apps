@@ -105,7 +105,6 @@ export function EditorContextMenu({ containerRef }: EditorContextMenuProps) {
     // Reposition based on the menu's measured size once it has rendered — a
     // post-render DOM measurement that cannot be derived during render. The
     // equality guard prevents a re-render loop.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (x !== position.x || y !== position.y) setPosition({ x, y });
   }, [position]);
 

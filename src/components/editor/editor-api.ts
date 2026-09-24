@@ -2,6 +2,7 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 import type { EditorView } from "@codemirror/view";
+import { attachmentMarkdown } from "@/lib/attachments";
 
 /** Module-level ref to the active EditorView for programmatic inserts. */
 let activeView: EditorView | null = null;
@@ -52,8 +53,8 @@ export function wrapSelection(prefix: string, suffix: string, placeholder: strin
 }
 
 /** Insert an image markdown reference at the cursor. */
-export function insertImageMarkdown(altText: string, mdPath: string) {
-  insertAtCursor(`![${altText}](${mdPath})\n`);
+export function insertImageMarkdown(altText: string, mdPath: string, comment = "") {
+  insertAtCursor(`${attachmentMarkdown(altText, mdPath, comment)}\n`);
 }
 
 /** Insert prefix at the start of the current line. */

@@ -70,10 +70,53 @@ export function parseSecretOpen(line: string): string | null {
   return null;
 }
 
-/** True when the line opens or closes a markdown fenced code block. */
-function isCodeFence(line: string): boolean {
-  const trimmed = line.trim();
-  return trimmed.startsWith("```") || trimmed.startsWith("~~~");
+/**
+ * Fenced code blocks, tracked the way CommonMark 4.5 defines them, so a
+ * `:::secret` fence inside a code example is left alone and one after the
+ * real closer is not.
+ *
+ * A fence opens on a line whose first non-blank characters are three or more
+ * of one marker, ` or ~, and for backticks the rest of the line may not
+ * contain a backtick (that is inline code). It closes only on a line that is
+ * nothing but that same marker, at least as many times. While open, everything
+ * else is content, including "```bash" or the other marker.
+ *
+ * The old rule toggled on every marker line, which put the parser one fence
+ * out of phase with the editor after any fence that quoted a fence, and the
+ * block below was written to disk in plaintext behind a lock icon. This is the
+ * one implementation for the extension, the editor and mobile; the Rust side
+ * has the same type, and both are pinned by the same test cases.
+ */
+export class FenceTracker {
+  private open: { marker: string; run: number } | null = null;
+
+  /** Whether an earlier line opened a fence that has not closed. */
+  isOpen(): boolean {
+    return this.open !== null;
+  }
+
+  /**
+   * Feed one line. Returns true when the line is itself a fence marker,
+   * opening or closing, which callers pass through untouched.
+   */
+  observe(line: string): boolean {
+    const trimmed = line.trim();
+    const first = trimmed[0];
+    if (first !== "`" && first !== "~") return false;
+    let run = 0;
+    while (trimmed[run] === first) run++;
+    if (run < 3) return false;
+
+    if (this.open === null) {
+      if (first === "`" && trimmed.slice(run).includes("`")) return false;
+      this.open = { marker: first, run };
+      return true;
+    }
+    const closes =
+      first === this.open.marker && run >= this.open.run && trimmed.length === run;
+    if (closes) this.open = null;
+    return closes;
+  }
 }
 
 /**
@@ -107,24 +150,24 @@ export function parseSecretFields(body: string): Record<string, string> {
  * Extract every secret block from page content.
  */
 export function extractSecretBlocks(
-  content: string
+  content: string,
 ): Array<{ label: string; body: string; fields: Record<string, string> }> {
-  const blocks: Array<{ label: string; body: string; fields: Record<string, string> }> = [];
+  const blocks: Array<{ label: string; body: string; fields: Record<string, string> }> =
+    [];
   const lines = content.split("\n");
 
-  let inCodeFence = false;
+  const fence = new FenceTracker();
   let i = 0;
 
   while (i < lines.length) {
     const line = lines[i] ?? "";
 
-    if (isCodeFence(line)) {
-      inCodeFence = !inCodeFence;
+    if (fence.observe(line)) {
       i++;
       continue;
     }
 
-    const label = inCodeFence ? null : parseSecretOpen(line);
+    const label = fence.isOpen() ? null : parseSecretOpen(line);
     if (label === null) {
       i++;
       continue;

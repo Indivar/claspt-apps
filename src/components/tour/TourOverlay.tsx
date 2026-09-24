@@ -11,8 +11,9 @@
  * auto-advancing past missing targets, keyboard navigation, focus trapping, and
  * persisting that the tour has been seen.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useUIStore } from "@/stores/ui-store";
+import { getLicenseStatus } from "@/lib/commands";
 import {
   getQuickSteps,
   getAdvancedSteps,
@@ -30,7 +31,22 @@ export function TourOverlay() {
   const tooltipRef = useRef<HTMLDivElement>(null);
   const prevStepRef = useRef<TourStep | null>(null);
 
-  const steps = tourTier === "quick" ? getQuickSteps() : getAdvancedSteps();
+  // The tour is built for the plan in hand: a step that points at a control a
+  // free user does not have is a promise the app cannot keep.
+  const [hasPro, setHasPro] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getLicenseStatus()
+      .then((status) => {
+        if (!cancelled) setHasPro(status.is_pro && !status.is_expired);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const steps = tourTier === "quick" ? getQuickSteps(hasPro) : getAdvancedSteps(hasPro);
   const currentStep = steps[tourStep];
   const isLast = tourStep === steps.length - 1;
   const showCompletion = tourTier === "quick" && tourStep >= steps.length;
@@ -136,7 +152,7 @@ export function TourOverlay() {
   function handleNext() {
     const state = useUIStore.getState();
     const currentSteps =
-      state.tourTier === "quick" ? getQuickSteps() : getAdvancedSteps();
+      state.tourTier === "quick" ? getQuickSteps(hasPro) : getAdvancedSteps(hasPro);
     const atLast = state.tourStep === currentSteps.length - 1;
 
     if (atLast) {

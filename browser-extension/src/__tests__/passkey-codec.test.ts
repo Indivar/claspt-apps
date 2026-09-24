@@ -9,6 +9,8 @@ import {
   registrationToCredential,
   requestOptionsToRequest,
   toBase64Url,
+  rpIdAllowedForHost,
+  passkeyOriginFrom,
 } from "@/shared/passkey-codec";
 
 const bytes = (...b: number[]) => new Uint8Array(b);
@@ -143,5 +145,60 @@ describe("credential objects", () => {
     expect(new TextDecoder().decode(withHandle.response.userHandle as ArrayBuffer)).toBe(
       "user",
     );
+  });
+});
+
+describe("rpIdAllowedForHost", () => {
+  // The WebAuthn rule, applied by us because the page cannot be trusted to.
+  it("accepts the host itself and its registrable-domain suffixes", () => {
+    expect(rpIdAllowedForHost("github.com", "github.com")).toBe(true);
+    expect(rpIdAllowedForHost("login.github.com", "github.com")).toBe(true);
+    expect(rpIdAllowedForHost("a.login.example.com", "login.example.com")).toBe(true);
+    expect(rpIdAllowedForHost("app.example.co.uk", "example.co.uk")).toBe(true);
+    expect(rpIdAllowedForHost("GitHub.com.", "github.com")).toBe(true);
+  });
+
+  it("refuses a public suffix, which strangers share", () => {
+    expect(rpIdAllowedForHost("user.github.io", "github.io")).toBe(false);
+    expect(rpIdAllowedForHost("www.example.co.uk", "co.uk")).toBe(false);
+    expect(rpIdAllowedForHost("shop.example.com", "com")).toBe(false);
+  });
+
+  it("refuses any host that is not a suffix match on a label boundary", () => {
+    // The attack: evil.com asks for github.com. Also the lookalike.
+    expect(rpIdAllowedForHost("evil.com", "github.com")).toBe(false);
+    expect(rpIdAllowedForHost("evil-github.com", "github.com")).toBe(false);
+    expect(rpIdAllowedForHost("github.com.evil.com", "github.com")).toBe(false);
+    expect(rpIdAllowedForHost("github.com", "login.github.com")).toBe(false);
+  });
+
+  it("compares loopback and IP hosts whole", () => {
+    expect(rpIdAllowedForHost("127.0.0.1", "127.0.0.1")).toBe(true);
+    expect(rpIdAllowedForHost("127.0.0.1", "0.0.1")).toBe(false);
+    expect(rpIdAllowedForHost("localhost", "localhost")).toBe(true);
+  });
+
+  it("refuses empty input", () => {
+    expect(rpIdAllowedForHost("", "github.com")).toBe(false);
+    expect(rpIdAllowedForHost("github.com", "")).toBe(false);
+  });
+});
+
+describe("passkeyOriginFrom", () => {
+  it("returns the origin for https and loopback http only", () => {
+    expect(passkeyOriginFrom("https://shop.example.com/checkout?x=1")).toBe(
+      "https://shop.example.com",
+    );
+    expect(passkeyOriginFrom("http://localhost:3000/login")).toBe(
+      "http://localhost:3000",
+    );
+    expect(passkeyOriginFrom("http://127.0.0.1/")).toBe("http://127.0.0.1");
+  });
+
+  it("refuses insecure, extension, and missing URLs", () => {
+    expect(passkeyOriginFrom("http://shop.example.com/")).toBeNull();
+    expect(passkeyOriginFrom("chrome-extension://abc/popup.html")).toBeNull();
+    expect(passkeyOriginFrom("not a url")).toBeNull();
+    expect(passkeyOriginFrom(undefined)).toBeNull();
   });
 });

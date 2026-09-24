@@ -406,9 +406,6 @@ pub async fn status(
         if status.is_expired {
             return None;
         }
-        if status.is_trial {
-            return Some("Trial".to_string());
-        }
         if status.is_pro {
             return Some(status.tier.unwrap_or_else(|| "Pro".to_string()));
         }
@@ -594,6 +591,15 @@ pub async fn update_page(
 
     // Read current page for encryption state
     let current = crud::read_page(&vd, &path).map_err(map_page_err)?;
+    // A Notes token may not replace a page that holds secrets, even with a
+    // body that holds none: the ciphertext would be gone. Delete, move and
+    // rename had this guard; the two full-replace routes did not.
+    if scope == TokenScope::Notes && page_has_secrets(&current) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Notes token cannot overwrite a page containing secrets".to_string(),
+        ));
+    }
     // A full-body encrypted page seals everything, so only block-mode pages
     // can put a value on disk in the clear.
     if !current.meta.encrypted {
@@ -628,20 +634,18 @@ pub async fn delete_page(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let vd = vault_dir(&ctx)?;
 
-    // Read page info before deleting
-    let page_info = crud::read_page(&vd, &path).ok();
+    // Only a page that can be read is a page that can be deleted. This used
+    // to proceed when the read failed, which is exactly the case for a
+    // directory or a vault-internal file, and so skipped every guard below.
+    let page = crud::read_page(&vd, &path).map_err(map_page_err)?;
     // A Notes-scope token must not destroy secret-bearing pages it cannot read.
-    if auth.scope == TokenScope::Notes {
-        if let Some(ref page) = page_info {
-            if page_has_secrets(page) {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    "Notes token cannot delete pages containing secrets".to_string(),
-                ));
-            }
-        }
+    if auth.scope == TokenScope::Notes && page_has_secrets(&page) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Notes token cannot delete pages containing secrets".to_string(),
+        ));
     }
-    if let Some(ref page) = page_info {
+    {
         let search = ctx.services.search();
         if let Ok(guard) = search.engine.lock() {
             if let Some(engine) = guard.as_ref() {
@@ -651,9 +655,7 @@ pub async fn delete_page(
     }
 
     crud::delete_page(&vd, &path).map_err(map_page_err)?;
-    if let Some(page) = page_info {
-        record_save(&ctx, &page.meta.title);
-    }
+    record_save(&ctx, &page.meta.title);
     emit_pages_changed(&ctx);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -975,6 +977,7 @@ pub struct MemoryListQuery {
 }
 
 /// PUT /api/memory/:namespace — upsert a memory
+#[allow(clippy::result_large_err)]
 pub async fn memory_upsert(
     Extension(ctx): Extension<Arc<ApiContext>>,
     auth: AuthInfo,
@@ -982,6 +985,8 @@ pub async fn memory_upsert(
     headers: axum::http::HeaderMap,
     Json(body): Json<UpsertMemoryBody>,
 ) -> Result<axum::response::Response, axum::response::Response> {
+    // `Result<Response, Response>` is axum's own shape for "either outcome is
+    // a response"; the size the lint objects to is the framework's type.
     let scope = auth.scope;
 
     let vd = vault_dir(&ctx).map_err(IntoResponse::into_response)?;
@@ -993,6 +998,19 @@ pub async fn memory_upsert(
     let if_match = headers.get("if-match").and_then(|v| v.to_str().ok());
     let existing = agent_memory::read_memory(&vd, &namespace, &body.title);
     let is_new = matches!(existing, Err(crate::pages::error::PageError::NotFound(_)));
+    // Same rule as update_page: a Notes token may not overwrite a memory
+    // that holds secrets, whatever the new body contains.
+    if scope == TokenScope::Notes {
+        if let Ok(ref page) = existing {
+            if page_has_secrets(page) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Notes token cannot overwrite a memory containing secrets".to_string(),
+                )
+                    .into_response());
+            }
+        }
+    }
     require_if_match(existing, if_match).map_err(IntoResponse::into_response)?;
     // A new page whose title reads like an existing one is how a memory
     // starts contradicting itself; the write goes through, with a warning.
@@ -1066,6 +1084,7 @@ pub struct AppendMemoryBody {
 /// POST /api/memory/:namespace/:title/append — add text to the end of a memory,
 /// creating it when absent. The existing body is not read back or re-sent, so
 /// two agents appending at once both land instead of one overwriting the other.
+#[allow(clippy::result_large_err)]
 pub async fn memory_append(
     Extension(ctx): Extension<Arc<ApiContext>>,
     auth: AuthInfo,
@@ -1073,6 +1092,7 @@ pub async fn memory_append(
     headers: axum::http::HeaderMap,
     Json(body): Json<AppendMemoryBody>,
 ) -> Result<axum::response::Response, axum::response::Response> {
+    // See memory_upsert: the Err type is axum's Response by design.
     let scope = auth.scope;
     let vd = vault_dir(&ctx).map_err(IntoResponse::into_response)?;
     let key = master_key(&ctx).map_err(IntoResponse::into_response)?;
@@ -1504,15 +1524,25 @@ pub struct BrowserJobsQuery {
     pub wait: Option<u64>,
 }
 
+/// Login jobs carry decrypted credentials, so the client taking them must be
+/// a paired browser extension *and* hold Secrets scope. Pairing offers Notes
+/// scope as a choice; an owner who chose it for the browser did not choose to
+/// have passwords delivered to it through the job queue.
 fn require_extension(auth: &AuthInfo) -> Result<(), (StatusCode, String)> {
-    if auth.is_extension() {
-        Ok(())
-    } else {
-        Err((
+    if !auth.is_extension() {
+        return Err((
             StatusCode::FORBIDDEN,
             "only a paired browser extension may handle login jobs".to_string(),
-        ))
+        ));
     }
+    if auth.scope != TokenScope::Secrets {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "the browser extension is paired with notes access only; login jobs need secrets access"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// GET /api/browser/jobs?wait=N — the extension's long poll for the next job.
@@ -1794,11 +1824,18 @@ pub async fn audit_secrets_route(
 /// call it (labels are already plaintext).
 pub async fn find_secrets_route(
     Extension(ctx): Extension<Arc<ApiContext>>,
-    _auth: AuthInfo,
+    auth: AuthInfo,
     Query(params): Query<FindSecretsQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let vd = vault_dir(&ctx)?;
-    let results = agent_secret::find_secrets(&vd, params.q.as_deref()).map_err(map_page_err)?;
+    let mut results = agent_secret::find_secrets(&vd, params.q.as_deref()).map_err(map_page_err)?;
+    // Which blocks sit unsealed on disk is Secrets-scope information; see
+    // `FoundSecret::encrypted`.
+    if auth.scope == TokenScope::Notes {
+        for found in &mut results {
+            found.encrypted = None;
+        }
+    }
     Ok(Json(results))
 }
 

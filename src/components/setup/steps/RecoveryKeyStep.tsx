@@ -2,9 +2,22 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 import { useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { StepHeading, StepFooter } from "@/components/setup/WizardFrame";
-import { copyToClipboard } from "@/lib/clipboard";
+import { clearClipboardAfter, copyToClipboard } from "@/lib/clipboard";
+import * as cmd from "@/lib/commands";
+import { useVaultStore } from "@/stores/vault-store";
 
+/**
+ * The one moment the recovery key exists.
+ *
+ * "Copy" alone was not enough: a clipboard lasts until the next copy, and the
+ * people who need this key are the ones who will not think about it again for
+ * a year. Saving writes a sheet that explains itself — which vault, when, and
+ * what to do with it — and the app remembers where it went so Settings can
+ * answer "where did I put it?" later. Printing is there because paper survives
+ * the disk failure that makes the key necessary in the first place.
+ */
 export function RecoveryKeyStep({
   recoveryKey,
   onNext,
@@ -14,8 +27,41 @@ export function RecoveryKeyStep({
   onNext: () => void;
   onBack: () => void;
 }) {
+  const vaultDir = useVaultStore((s) => s.vaultDir);
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [savedTo, setSavedTo] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSave = async () => {
+    setError(null);
+    if (!vaultDir) return;
+    try {
+      const defaultPath = await cmd.recoveryKeyFilename(vaultDir);
+      const chosen = await save({
+        defaultPath,
+        title: "Save your recovery key",
+        filters: [{ name: "Text", extensions: ["txt"] }],
+      });
+      if (!chosen) return; // dialog dismissed
+      const written = await cmd.saveRecoveryKey(recoveryKey, chosen, vaultDir);
+      setSavedTo(written);
+      // Saving it is the confirmation; making the user also tick the box after
+      // doing the thing the box asks about is a pointless second step.
+      setSaved(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handlePrint = async () => {
+    setError(null);
+    try {
+      await cmd.printWindow();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   return (
     <>
@@ -31,18 +77,51 @@ export function RecoveryKeyStep({
         </p>
       </div>
 
-      <div className="mb-6 flex gap-2.5">
+      <div className="mb-3 flex flex-wrap gap-2.5">
+        <button
+          type="button"
+          onClick={handleSave}
+          className="btn-accent rounded-xl px-4 py-2.5 text-[13px]"
+        >
+          Save to file…
+        </button>
         <button
           type="button"
           onClick={() => {
+            // The master key must not sit on the clipboard indefinitely;
+            // the modal that shows the key later clears it the same way.
             void copyToClipboard(recoveryKey);
+            clearClipboardAfter(30_000);
             setCopied(true);
           }}
           className="rounded-xl border border-border/60 bg-surface px-4 py-2.5 text-[13px] font-medium text-text-secondary transition-colors hover:bg-surface-overlay/60"
         >
           {copied ? "Copied" : "Copy"}
         </button>
+        <button
+          type="button"
+          onClick={handlePrint}
+          className="rounded-xl border border-border/60 bg-surface px-4 py-2.5 text-[13px] font-medium text-text-secondary transition-colors hover:bg-surface-overlay/60"
+        >
+          Print
+        </button>
       </div>
+
+      {savedTo && (
+        <p className="mb-3 max-w-[52ch] break-all text-[12px] leading-relaxed text-success">
+          Saved to {savedTo}
+        </p>
+      )}
+      {error && (
+        <p className="mb-3 max-w-[52ch] rounded-lg bg-danger/10 px-3 py-2 text-[12px] leading-relaxed text-danger">
+          {error}
+        </p>
+      )}
+
+      <p className="mb-5 max-w-[52ch] text-[12px] leading-relaxed text-text-muted">
+        Save it anywhere except inside the vault folder. Anything in there is copied to
+        every device the vault syncs to, alongside the data this key unlocks.
+      </p>
 
       <label className="flex max-w-[46ch] cursor-pointer items-start gap-3">
         <input
@@ -55,6 +134,28 @@ export function RecoveryKeyStep({
           I have saved my recovery key somewhere safe
         </span>
       </label>
+
+      {/* Only ever on paper: hidden on screen, revealed by the print rules in
+          index.css. Kept beside the key rather than built in the print handler
+          so the two cannot say different things. */}
+      <div className="print-sheet">
+        <h1>Claspt recovery key</h1>
+        <p>
+          This is the recovery key for the Claspt vault at <strong>{vaultDir}</strong>. If
+          the master password for that vault is forgotten, this key is the only way back
+          into it. Nobody at Claspt can reset the password or open the vault.
+        </p>
+        <p>
+          Anyone holding both this sheet and the vault folder can read everything in the
+          vault. Keep it somewhere only you can reach.
+        </p>
+        <div className="print-key">{recoveryKey}</div>
+        <p>
+          To use it: open Claspt, choose the vault folder above, click “Forgot password?”
+          on the unlock screen, paste this key, then set a new master password. The key
+          does not change when the password does, so this sheet stays valid afterwards.
+        </p>
+      </div>
 
       <StepFooter>
         <button

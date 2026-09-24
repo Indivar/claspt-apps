@@ -17,7 +17,7 @@ interface Props {
  */
 export function TroubleshootingPanel({ defaultOpen = false, heading = "What you might see" }: Props) {
   const [open, setOpen] = useState(defaultOpen);
-  const platform = useMemo(detectPlatform, []);
+  const platform = useMemo(() => detectPlatform(), []);
   const hints = useMemo(() => connectionHintsFor(platform), [platform]);
 
   const platformLabel =

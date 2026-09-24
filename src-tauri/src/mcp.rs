@@ -30,8 +30,10 @@
 //! unlock the vault in-process from `CLASPT_PASSWORD`, which handed the
 //! master password to the agent process and bypassed approval entirely. It was
 //! removed in 3.3.0. A headless server with its own unlock and policy is
-//! `claspt serve` (see docs/specs/release-3.3-plan.md).
+//! `claspt serve` (see `src/serve.rs`).
 
+use crate::api_response::read_response_for;
+use crate::local_api::clients::token_hint;
 use std::io::{self, BufRead, Write};
 
 use serde::{Deserialize, Serialize};
@@ -477,20 +479,29 @@ impl McpSession {
                 .unwrap_or(9315);
             let base_url = format!("http://127.0.0.1:{port}");
 
+            // Say at once whether this token will work. "Connected" used to be
+            // printed without asking, and a stale token only showed as a
+            // generic refusal on the first tool call, with no clue which of
+            // several config files held it.
+            let probe = probe_status(&base_url, &token);
+            eprintln!("{}", startup_line(&probe, &token_hint(&token), port, scope));
             self.backend = Some(McpBackend::HttpApi {
                 base_url,
                 token,
                 scope,
             });
-            eprintln!("[mcp] Connected to local API (scope: {:?})", scope);
         }
     }
 
     fn handle_tool_call(&self, name: &str, args: &Value) -> Result<Value, String> {
         // Backend-agnostic: the memory guide is a static convention doc.
         if name == "memory_guide" {
+            // The namespace goes with the guide so a session can see, at the
+            // start, which project's memory it is about to use and whether a
+            // marker in the checkout was seen and not honoured.
             return Ok(serde_json::json!({
                 "guide": crate::pages::agent_memory::memory_guide(),
+                "namespace": self.namespace,
             }));
         }
         match &self.backend {
@@ -1008,6 +1019,61 @@ impl McpSession {
 
 // ── HTTP helpers ──────────────────────────────────────────
 
+/// What one probe of `/api/status` found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Probe {
+    /// The app answered and accepted the token.
+    Accepted,
+    /// The app answered 401: the open vault does not know this token.
+    Refused,
+    /// The app answered something else (locked vault, old version).
+    Other(u16),
+    /// Nothing is listening, or it did not answer in time.
+    Unreachable,
+}
+
+fn probe_status(base_url: &str, token: &str) -> Probe {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return Probe::Unreachable,
+    };
+    match client
+        .get(format!("{base_url}/api/status"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+    {
+        Ok(resp) if resp.status().is_success() => Probe::Accepted,
+        Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => Probe::Refused,
+        Ok(resp) => Probe::Other(resp.status().as_u16()),
+        Err(_) => Probe::Unreachable,
+    }
+}
+
+/// The one line printed at start, for the tool's log and the owner's eyes.
+pub(crate) fn startup_line(probe: &Probe, hint: &str, port: u16, scope: TokenScope) -> String {
+    match probe {
+        Probe::Accepted => {
+            format!("[mcp] Connected to Claspt on port {port} as {hint} ({scope:?} scope)")
+        }
+        Probe::Refused => format!(
+            "[mcp] Token {hint} is not one the vault open in Claspt knows; every tool call \
+             will be refused until it is replaced. Run `claspt mcp doctor` to see which config \
+             file holds a stale token, or `claspt mcp install <client>` to issue a fresh shared one."
+        ),
+        Probe::Other(status) => format!(
+            "[mcp] Claspt answered {status} on port {port} for {hint}; the vault may be locked. \
+             Tool calls retry on each request."
+        ),
+        Probe::Unreachable => format!(
+            "[mcp] Claspt is not reachable on port {port}. Open the app and unlock the vault; \
+             tool calls retry on each request."
+        ),
+    }
+}
+
 fn http_get(base_url: &str, path: &str, token: &str) -> Result<Value, String> {
     let url = format!("{base_url}{path}");
     let resp = reqwest::blocking::Client::new()
@@ -1015,12 +1081,7 @@ fn http_get(base_url: &str, path: &str, token: &str) -> Result<Value, String> {
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .map_err(|e| format!("Request failed: {e}"))?;
-    let status = resp.status();
-    let body: Value = resp.json().map_err(|e| format!("Parse failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("API error {status}: {body}"));
-    }
-    Ok(body)
+    read_response_for(resp, Some(token))
 }
 
 fn http_post(base_url: &str, path: &str, token: &str, body: &Value) -> Result<Value, String> {
@@ -1066,12 +1127,7 @@ fn http_send(
         request = request.header("If-Match", etag);
     }
     let resp = request.send().map_err(|e| format!("Request failed: {e}"))?;
-    let status = resp.status();
-    let body: Value = resp.json().map_err(|e| format!("Parse failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("API error {status}: {body}"));
-    }
-    Ok(body)
+    read_response_for(resp, Some(token))
 }
 
 fn http_delete(base_url: &str, path: &str, token: &str) -> Result<Value, String> {
@@ -1081,15 +1137,10 @@ fn http_delete(base_url: &str, path: &str, token: &str) -> Result<Value, String>
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .map_err(|e| format!("Request failed: {e}"))?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::NO_CONTENT {
+    if resp.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(serde_json::json!({ "deleted": true }));
     }
-    let body: Value = resp.json().map_err(|e| format!("Parse failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("API error {status}: {body}"));
-    }
-    Ok(body)
+    read_response_for(resp, Some(token))
 }
 
 // ── Main loop ──────────────────────────────────────────────
@@ -1416,12 +1467,18 @@ fn handle_request(session: &McpSession, req: JsonRpcRequest) -> Option<JsonRpcRe
 
             let call_result = session.handle_tool_call(tool_name, &arguments);
 
-            // In debug builds, log the full response for development.
-            // In release builds, only log the tool name to prevent secret leakage.
-            #[cfg(debug_assertions)]
-            log::debug!("MCP tool '{}' result: {:?}", tool_name, call_result);
-            #[cfg(not(debug_assertions))]
-            log::info!("MCP tool completed: {}", tool_name);
+            // The result of `read_secret` is a decrypted value, so the body is
+            // never logged, in any build: a contributor running a debug build
+            // with RUST_LOG=debug would otherwise leave credentials in the log
+            // file. The size is enough to see that a call returned something.
+            match &call_result {
+                Ok(result) => log::info!(
+                    "MCP tool completed: {} ({} bytes)",
+                    tool_name,
+                    result.to_string().len()
+                ),
+                Err(e) => log::info!("MCP tool failed: {} ({e})", tool_name),
+            }
 
             match call_result {
                 Ok(result) => {
@@ -1507,6 +1564,51 @@ pub fn run_mcp_server() {
 mod tests {
     use super::*;
 
+    /// The line a stale token produces has to name the token by hint and
+    /// the two commands that fix it; the line for a good token says who it is.
+    #[test]
+    fn the_startup_line_says_whether_the_token_will_work() {
+        let ok = startup_line(
+            &Probe::Accepted,
+            "clss_\u{2026}8616",
+            9315,
+            TokenScope::Secrets,
+        );
+        assert!(
+            ok.contains("Connected") && ok.contains("clss_\u{2026}8616"),
+            "{ok}"
+        );
+
+        let refused = startup_line(
+            &Probe::Refused,
+            "clss_\u{2026}9b31",
+            9315,
+            TokenScope::Secrets,
+        );
+        assert!(!refused.contains("Connected"), "{refused}");
+        assert!(refused.contains("clss_\u{2026}9b31"), "{refused}");
+        assert!(refused.contains("claspt mcp doctor"), "{refused}");
+        assert!(refused.contains("claspt mcp install"), "{refused}");
+
+        let away = startup_line(
+            &Probe::Unreachable,
+            "clss_\u{2026}9b31",
+            9315,
+            TokenScope::Notes,
+        );
+        assert!(
+            away.contains("9315") && away.contains("not reachable"),
+            "{away}"
+        );
+        let locked = startup_line(
+            &Probe::Other(423),
+            "clss_\u{2026}9b31",
+            9315,
+            TokenScope::Notes,
+        );
+        assert!(locked.contains("423"), "{locked}");
+    }
+
     fn session(ns: &str) -> McpSession {
         McpSession {
             backend: None,
@@ -1514,6 +1616,7 @@ mod tests {
                 namespace: ns.to_string(),
                 source: crate::agent_namespace::NamespaceSource::FolderName,
                 marker_path: None,
+                ignored_marker: None,
             },
         }
     }

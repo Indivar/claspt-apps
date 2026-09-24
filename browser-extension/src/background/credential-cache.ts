@@ -121,12 +121,15 @@ export class CredentialCache {
         const blocks = extractSecretBlocks(page.content);
 
         for (const block of blocks) {
+          const tags = page.meta?.tags ?? [];
           credentials.push({
             pagePath: result.path,
             pageTitle: page.meta?.title ?? result.title,
             label: block.label,
             fields: block.fields,
             url: block.fields["url"] || block.fields["site"] || block.fields["website"],
+            tags,
+            captured: tags.includes("captured"),
           });
         }
       } catch {

@@ -7,25 +7,23 @@
  * Buttons apply markdown formatting to the active editor via the editor-api
  * helpers (headings, bold/italic/strike/code, lists, quote, link, image,
  * code block with language picker, rule, table), plus insert-secret-block,
- * share, and markdown-help actions. Image insertion supports either a direct
- * insert or an options dialog (resize/convert). A second row renders any
- * enabled markdown-extension inserts via {@link ExtensionToolbar}.
+ * share, and markdown-help actions. Attach hands picked files to the attach
+ * dialog, which asks about encryption and enforces the vault's size limit.
+ * A second row renders any enabled markdown-extension inserts via
+ * {@link ExtensionToolbar}.
  */
 import { useState, useRef } from "react";
 import { useUIStore } from "@/stores/ui-store";
-import { usePagesStore } from "@/stores/pages-store";
 import { useClickOutside } from "@/hooks/use-click-outside";
 import { kbd } from "@/lib/platform";
 import { open } from "@tauri-apps/plugin-dialog";
-import {
-  insertAtCursor,
-  insertImageMarkdown,
-  prefixLine,
-  wrapSelection,
-} from "./editor-api";
-import { saveMediaFromPath } from "@/lib/commands";
-import { ImageOptionsModal } from "./ImageOptionsModal";
+import { toast } from "sonner";
+import { errorMessage } from "@/lib/error-message";
+import { insertAtCursor, prefixLine, wrapSelection } from "./editor-api";
+import { ATTACHMENT_EXTENSIONS } from "@/lib/attachments";
+import { sourceFromPath, useAttachStore } from "@/stores/attach-store";
 import { ExtensionToolbar } from "./ExtensionToolbar";
+import { useHasPro } from "@/hooks/use-has-pro";
 
 /** Shared icon button used for individual toolbar actions. */
 function ToolbarButton({
@@ -48,113 +46,38 @@ function Divider() {
   return <div className="mx-1 h-5 w-px bg-border" />;
 }
 
-const IMAGE_FILTERS = [
-  { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "pdf"] },
-];
-const RASTER_FILTERS = [
-  { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
+const ATTACH_FILTERS = [
+  { name: "Images and PDFs", extensions: [...ATTACHMENT_EXTENSIONS] },
 ];
 
-/** Split button: insert an image/file as-is, or open the options dialog
- *  (resize/convert) via a dropdown. Saves the picked file into the vault. */
-function InsertImageButton() {
-  const folder = usePagesStore((s) => s.activePage?.meta.folder ?? "general");
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [optionsFilePath, setOptionsFilePath] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
+/** Picks one or more files and hands them to the attach dialog, which asks
+ *  about encryption and enforces the size limit for each. */
+function AttachButton() {
+  const enqueue = useAttachStore((s) => s.enqueue);
 
-  useClickOutside(menuRef, () => setMenuOpen(false), menuOpen);
-
-  async function handleInsertAsIs() {
-    setMenuOpen(false);
-    const selected = await open({ multiple: false, filters: IMAGE_FILTERS });
+  async function pick() {
+    const selected = await open({ multiple: true, filters: ATTACH_FILTERS });
     if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
     try {
-      const mf = await saveMediaFromPath(folder, selected);
-      const name =
-        selected
-          .split(/[/\\]/)
-          .pop()
-          ?.replace(/\.[^.]+$/, "") ?? "image";
-      insertImageMarkdown(name, mf.md_path);
+      enqueue(await Promise.all(paths.map(sourceFromPath)));
     } catch (err) {
-      console.error("Failed to insert image:", err);
+      toast.error(`Could not read that file: ${errorMessage(err)}`);
     }
   }
 
-  async function handleInsertWithOptions() {
-    setMenuOpen(false);
-    const selected = await open({ multiple: false, filters: RASTER_FILTERS });
-    if (!selected) return;
-    setOptionsFilePath(selected);
-  }
-
   return (
-    <>
-      <div className="relative flex items-center" ref={menuRef}>
-        {/* Main button: insert as-is */}
-        <button
-          onClick={handleInsertAsIs}
-          title="Insert image or file (PNG, JPG, PDF, SVG...)"
-          className="icon-btn rounded-l-md p-1.5 text-text-muted"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <rect
-              x="1"
-              y="2"
-              width="14"
-              height="12"
-              rx="2"
-              stroke="currentColor"
-              strokeWidth="1.5"
-            />
-            <circle cx="5" cy="6" r="1.5" fill="currentColor" />
-            <path d="M1 12l4-4 2 2 3-3 5 5H1z" fill="currentColor" opacity="0.3" />
-          </svg>
-        </button>
-        {/* Dropdown arrow */}
-        <button
-          onClick={() => setMenuOpen(!menuOpen)}
-          title="Insert options"
-          className="icon-btn -ml-px rounded-r-md px-0.5 py-1.5 text-text-muted"
-        >
-          <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
-            <path
-              d="M2 3l2 2 2-2"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-        {/* Dropdown menu */}
-        {menuOpen && (
-          <div className="absolute left-0 top-full z-50 mt-1 w-48 rounded-lg border border-border bg-surface shadow-lg">
-            <button
-              onClick={handleInsertAsIs}
-              className="w-full px-3 py-2 text-left text-[12px] text-text-secondary transition-colors hover:bg-surface-overlay"
-            >
-              Insert image or file
-            </button>
-            <button
-              onClick={handleInsertWithOptions}
-              className="w-full px-3 py-2 text-left text-[12px] text-text-secondary transition-colors hover:bg-surface-overlay"
-            >
-              Insert with options (resize, convert)...
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Image options modal */}
-      {optionsFilePath && (
-        <ImageOptionsModal
-          filePath={optionsFilePath}
-          onClose={() => setOptionsFilePath(null)}
+    <ToolbarButton title="Attach file (image or PDF)" onClick={pick}>
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+        <path
+          d="M10.5 4.5L5.75 9.25a1.75 1.75 0 002.5 2.5l5-5a3.25 3.25 0 00-4.6-4.6L3.4 7.4a4.75 4.75 0 006.7 6.7l3.4-3.4"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
         />
-      )}
-    </>
+      </svg>
+    </ToolbarButton>
   );
 }
 
@@ -287,6 +210,7 @@ function SecretBlockButton() {
 
 /** The editor's markdown formatting toolbar (plus extension row). */
 export function EditorToolbar() {
+  const hasPro = useHasPro();
   return (
     <div className="editor-toolbar flex flex-col">
       <div className="flex items-center gap-0.5 px-4 py-1.5">
@@ -464,7 +388,7 @@ export function EditorToolbar() {
             />
           </svg>
         </ToolbarButton>
-        <InsertImageButton />
+        <AttachButton />
         <CodeBlockButton />
         <ToolbarButton title="Horizontal rule" onClick={() => prefixLine("---\n")}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
@@ -507,28 +431,31 @@ export function EditorToolbar() {
         {/* Secret block */}
         <SecretBlockButton />
 
-        {/* Share */}
-        <ToolbarButton
-          title={kbd("Share page (Mod+Shift+E)")}
-          onClick={() => useUIStore.getState().setShareModalOpen(true)}
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M4 9v4a1 1 0 001 1h6a1 1 0 001-1V9"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <path
-              d="M8 10V2M5 5l3-3 3 3"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </ToolbarButton>
+        {/* Share — with a licence only; it used to be offered to
+            everyone and refuse once clicked. */}
+        {hasPro && (
+          <ToolbarButton
+            title={kbd("Share page (Mod+Shift+E)")}
+            onClick={() => useUIStore.getState().setShareModalOpen(true)}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M4 9v4a1 1 0 001 1h6a1 1 0 001-1V9"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M8 10V2M5 5l3-3 3 3"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </ToolbarButton>
+        )}
 
         <Divider />
 

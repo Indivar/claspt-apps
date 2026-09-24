@@ -6,10 +6,14 @@
 //! These pages are:
 //! - Hidden from the user's sidebar (already filtered by .securenotes prefix)
 //! - Read/written by the app for tracking, audit, preferences
-//! - Synced across devices via git
+//! - Device-local: the whole of `.securenotes/` is git-ignored and unstaged,
+//!   so nothing here is committed or synced
 //! - Not indexed in the search engine
 //!
-//! Each internal page is a JSON file (not markdown) for easy structured read/write.
+//! Each internal page is a JSON file (not markdown) for easy structured
+//! read/write. The journals that describe secrets (which credentials are weak
+//! or reused, which usernames were filled where, what was shared with whom)
+//! are sealed under the master key; see [`store::InternalStore`].
 
 pub mod access_log;
 pub mod approval_grants;

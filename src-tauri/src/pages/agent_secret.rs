@@ -63,8 +63,13 @@ fn validate_service(service: &str) -> Result<(), PageError> {
 pub struct FoundSecret {
     pub label: String,
     /// Whether the block's body is sealed on disk. False means the value is
-    /// readable in the file and should be fixed, not used.
-    pub encrypted: bool,
+    /// readable in the file and should be fixed, not used. Present for a
+    /// Secrets-scope caller only: the same fact is what `audit_secrets`
+    /// withholds from a Notes token, and a list of every unsealed block by
+    /// page and label is a targeting aid, so the field is dropped from the
+    /// Notes-scope response rather than reported as `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted: Option<bool>,
     pub page_title: String,
     pub page_path: String,
     pub folder: String,
@@ -143,12 +148,17 @@ pub fn store_secret(
     // page. The folder is always the fixed root, so the credential can only land
     // under `ai/`.
     let existing = find_service_page(vault_dir, service)?;
-    let current = match &existing {
+    // The page's storage mode travels with its content so the write below
+    // seals it the same way it was found.
+    let (current, full_body) = match &existing {
         Some(path) => {
             let page = crud::read_page(vault_dir, path)?;
-            secret::decrypt_secrets(&page.content, master_key)?
+            (
+                secret::decrypt_for_page(page.meta.encrypted, &page.content, master_key)?,
+                page.meta.encrypted,
+            )
         }
-        None => String::new(),
+        None => (String::new(), false),
     };
 
     // patch_block validates the label/values and fails closed BEFORE we create
@@ -157,7 +167,7 @@ pub fn store_secret(
     let pairs: Vec<(String, String)> = fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let result = secret::patch_block(&current, label, &pairs, &[], true)
         .map_err(|e| PageError::SecretBlock(e.to_string()))?;
-    let encrypted = secret::encrypt_secrets(&result.content, master_key)?;
+    let encrypted = secret::encrypt_for_page(full_body, &result.content, master_key)?;
 
     let page_path = match existing {
         Some(path) => path,
@@ -221,7 +231,7 @@ pub fn find_secrets(vault_dir: &Path, query: Option<&str>) -> Result<Vec<FoundSe
             out.push(FoundSecret {
                 reference_prefix,
                 label: block.label,
-                encrypted: block.encrypted,
+                encrypted: Some(block.encrypted),
                 page_title: meta.title.clone(),
                 page_path: rel_path.clone(),
                 folder: meta.folder.clone(),
@@ -574,11 +584,14 @@ mod tests {
         .unwrap();
         let mut found = find_secrets(vault, None).unwrap();
         found.sort_by(|a, b| a.label.cmp(&b.label));
-        let summary: Vec<(&str, bool)> = found
+        let summary: Vec<(&str, Option<bool>)> = found
             .iter()
             .map(|f| (f.label.as_str(), f.encrypted))
             .collect();
-        assert_eq!(summary, vec![("leaked", false), ("sealed", true)]);
+        assert_eq!(
+            summary,
+            vec![("leaked", Some(false)), ("sealed", Some(true))]
+        );
     }
 
     #[test]
@@ -598,7 +611,7 @@ mod tests {
             vault,
             "Scratch",
             "general",
-            "deploy with AKIAIOSFODNN7EXAMPLE\n:::secret[stripe]\nkey: sk_live_4eC39HqLyjWDarjtT1zdp7dc\n:::",
+            "deploy with AKIAIOSFODNN7EXAMPLE\n:::secret[stripe]\nkey: sk_test_4eC39HqLyjWDarjtT1zdp7dc\n:::",
             false,
         )
         .unwrap();
@@ -612,7 +625,7 @@ mod tests {
         assert_eq!(findings[1].label.as_deref(), Some("stripe"));
         let rendered = format!("{findings:?}");
         assert!(
-            !rendered.contains("sk_live_"),
+            !rendered.contains("4eC39HqLyjWDarjtT1zdp7dc"),
             "findings must never carry values"
         );
     }

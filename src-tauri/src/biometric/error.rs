@@ -29,6 +29,13 @@ pub enum BiometricError {
     #[error("no stored credential found")]
     NoCredential,
 
+    /// The key the keychain released did not match the vault it was asked
+    /// to open, so biometric unlock was switched off for that vault.
+    #[error(
+        "The biometric key saved on this device did not match this vault, so biometric unlock was switched off. Unlock with your password, then turn it back on in Settings › Security."
+    )]
+    WrongVault,
+
     /// Biometric unlock is temporarily locked out after repeated failures;
     /// the payload is the remaining cooldown in seconds.
     #[error("too many failed attempts — wait {0} seconds")]

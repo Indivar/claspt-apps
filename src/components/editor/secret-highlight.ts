@@ -1,6 +1,7 @@
 // Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
+import { FenceTracker } from "@claspt/shared/secret-parser";
 import {
   Decoration,
   type DecorationSet,
@@ -44,29 +45,17 @@ function buildSecretDecorationsInner(state: EditorState): DecorationSet {
   const doc = state.doc;
   const decos: Range<Decoration>[] = [];
   let inBlock = false;
-  let inCodeFence = false;
-  let codeFenceTicks = 0;
+  const fence = new FenceTracker();
 
   for (let i = 1; i <= doc.lines; i++) {
     const line = doc.line(i);
     const raw = line.text;
     const text = raw.trim();
 
-    // Track fenced code blocks
-    const fenceMatch = text.match(/^(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      const ticks = fenceMatch[1]!.length;
-      if (!inCodeFence) {
-        inCodeFence = true;
-        codeFenceTicks = ticks;
-      } else if (ticks >= codeFenceTicks && /^[`~]+$/.test(text)) {
-        inCodeFence = false;
-        codeFenceTicks = 0;
-      }
-      continue;
-    }
-
-    if (inCodeFence) continue;
+    // One rule for fences, shared with the parser that decides what gets
+    // encrypted on save, so what this highlights as a secret is what is sealed.
+    if (fence.observe(raw)) continue;
+    if (fence.isOpen()) continue;
 
     // Skip indented code blocks (4+ spaces or tab)
     if (raw.length > 0 && (raw.startsWith("    ") || raw.startsWith("\t"))) continue;

@@ -1,0 +1,21 @@
+# cargo-audit policy for this workspace.
+#
+# An advisory is ignored here only when nothing can be done about it in this
+# tree and the affected code cannot be reached with attacker-controlled
+# input. Each entry says why; remove it as soon as the upstream fix lands.
+[advisories]
+ignore = [
+    # rsa 0.9 Marvin timing side channel. No fixed release exists. RSA is used
+    # by the SSH agent to sign with keys the vault holds; the only party that
+    # can observe signing latency is a local process the owner already
+    # approved, rate-limited and logged by the local API.
+    "RUSTSEC-2023-0071",
+    # rkyv 0.7 is an optional dependency of rust_decimal that no feature in
+    # this workspace enables; it appears in Cargo.lock and is never compiled.
+    "RUSTSEC-2026-0235",
+    # quick-xml 0.38 (via plist, via tauri) and 0.39 (via wayland-scanner, a
+    # Linux build-time proc-macro) are pinned by tauri; neither parses input
+    # from outside the build. The import parser this app owns is on 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

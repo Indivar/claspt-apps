@@ -143,8 +143,37 @@ export function updatePage(path: string, content: string): Promise<Page> {
   return invoke("update_page", { path, content });
 }
 
-export function deletePage(path: string): Promise<void> {
+/** A page in the vault's trash. */
+export interface TrashEntry {
+  id: string;
+  original_path: string;
+  title: string;
+  folder: string;
+  encrypted: boolean;
+  deleted_at: string;
+  /** When the unlock-time purge will remove it under the current retention. */
+  purge_at: string;
+}
+
+/** Move a page to the vault's trash; the entry can restore it. */
+export function deletePage(path: string): Promise<TrashEntry> {
   return invoke("delete_page", { path });
+}
+
+export function trashList(): Promise<TrashEntry[]> {
+  return invoke("trash_list");
+}
+
+export function trashRestore(entryId: string): Promise<Page> {
+  return invoke("trash_restore", { entryId });
+}
+
+export function trashPurge(entryId: string): Promise<void> {
+  return invoke("trash_purge", { entryId });
+}
+
+export function trashEmpty(): Promise<number> {
+  return invoke("trash_empty");
 }
 
 export function deletePagesBulk(paths: string[]): Promise<number> {
@@ -202,6 +231,33 @@ export interface MediaFile {
   rel_path: string;
   md_path: string;
   abs_path: string;
+  /** Size of the original bytes, before any sealing. */
+  size: number;
+  /** Whether the file on disk is sealed under the master key. */
+  sealed: boolean;
+}
+
+/** An attachment read back for display. */
+export interface MediaRead {
+  data_url: string;
+  sealed: boolean;
+  size: number;
+  name: string;
+  ext: string;
+  rel_path: string;
+  md_path: string;
+}
+
+/** Every attachment in the vault, counted and summed by size on disk. */
+export interface MediaUsage {
+  files: number;
+  bytes: number;
+}
+
+/** Name, extension and size of a file the owner picked, before it is read. */
+export interface SourceFileInfo {
+  name: string;
+  ext: string;
   size: number;
 }
 
@@ -209,27 +265,65 @@ export function saveMedia(
   folder: string,
   data: number[],
   extension: string,
+  encrypt: boolean,
 ): Promise<MediaFile> {
-  return invoke("save_media", { folder, data, extension });
+  return invoke("save_media", { folder, data, extension, encrypt });
 }
 
 export function saveMediaFromPath(
   folder: string,
   sourcePath: string,
+  encrypt: boolean,
 ): Promise<MediaFile> {
-  return invoke("save_media_from_path", { folder, sourcePath });
+  return invoke("save_media_from_path", { folder, sourcePath, encrypt });
+}
+
+export function statSourceFile(sourcePath: string): Promise<SourceFileInfo> {
+  return invoke("stat_source_file", { sourcePath });
 }
 
 export function deleteMedia(relPath: string): Promise<void> {
   return invoke("delete_media", { relPath });
 }
 
+export function setMediaSealed(relPath: string, encrypt: boolean): Promise<MediaFile> {
+  return invoke("set_media_sealed", { relPath, encrypt });
+}
+
+export function mediaUsage(): Promise<MediaUsage> {
+  return invoke("media_usage");
+}
+
+/** The pages of a folder that still reference an attachment. */
+export interface MediaReferences {
+  pages: string[];
+  /** Encrypted pages in the folder, whose bodies could not be checked. */
+  unchecked_encrypted: number;
+}
+
+export function mediaReferences(
+  folder: string,
+  mdPath: string,
+): Promise<MediaReferences> {
+  return invoke("media_references", { folder, mdPath });
+}
+
+export function exportMedia(relPath: string, destPath: string): Promise<void> {
+  return invoke("export_media", { relPath, destPath });
+}
+
 export function resolveMediaPath(folder: string, mdPath: string): Promise<string> {
   return invoke("resolve_media_path", { folder, mdPath });
 }
 
-export function readMediaDataUrl(folder: string, mdPath: string): Promise<string> {
-  return invoke("read_media_data_url", { folder, mdPath });
+/** Read an attachment for display. With `includeData` false only its
+ *  description comes back and `data_url` is empty. */
+export function readMedia(
+  folder: string,
+  mdPath: string,
+  includeData: boolean,
+): Promise<MediaRead> {
+  return invoke("read_media_data_url", { folder, mdPath, includeData });
 }
 
 export function previewImageTransform(
@@ -239,12 +333,37 @@ export function previewImageTransform(
   return invoke("preview_image_transform", { sourcePath, params });
 }
 
+export function previewImageTransformBytes(
+  data: number[],
+  extension: string,
+  params: ImageTransformParams,
+): Promise<ImageTransformPreview> {
+  return invoke("preview_image_transform_bytes", { data, extension, params });
+}
+
 export function processAndSaveMedia(
   folder: string,
   sourcePath: string,
   params: ImageTransformParams,
+  encrypt: boolean,
 ): Promise<MediaFile> {
-  return invoke("process_and_save_media", { folder, sourcePath, params });
+  return invoke("process_and_save_media", { folder, sourcePath, params, encrypt });
+}
+
+export function processAndSaveMediaBytes(
+  folder: string,
+  data: number[],
+  extension: string,
+  params: ImageTransformParams,
+  encrypt: boolean,
+): Promise<MediaFile> {
+  return invoke("process_and_save_media_bytes", {
+    folder,
+    data,
+    extension,
+    params,
+    encrypt,
+  });
 }
 
 // ── Folders ─────────────────────────────────────────────
@@ -351,18 +470,79 @@ export function importMarkdownPage(
   return invoke("import_markdown_page", { filePath, title, folder, tags });
 }
 
+/** What is already at a chosen vault location, so the form can warn first. */
+export type VaultDirState = "empty" | "vault" | "damaged" | "not_empty";
+
+export function inspectVaultDir(path: string): Promise<VaultDirState> {
+  return invoke("inspect_vault_dir", { path });
+}
+
+/** What `connect_ai_tool` hands back: a config to paste, and where it points. */
+export interface AiToolConnection {
+  snippet: string;
+  port: number;
+  scope: "notes" | "secrets";
+}
+
+/**
+ * Mint an AI tool its own key, start the local API, and return the config
+ * fragment to paste into the tool's settings.
+ */
+export function connectAiTool(scope: "notes" | "secrets"): Promise<AiToolConnection> {
+  return invoke("connect_ai_tool", { scope });
+}
+
+/**
+ * Change the master password on an unlocked vault.
+ *
+ * The recovery key is unaffected — it is the master key itself, which this
+ * re-wraps rather than replaces.
+ */
+export function changeMasterPassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  return invoke("change_master_password", { oldPassword, newPassword });
+}
+
+// ── Recovery key ───────────────────────────────────────
+
+/** The filename to offer in the save dialog for this vault's recovery key. */
+export function recoveryKeyFilename(vaultDir: string): Promise<string> {
+  return invoke("recovery_key_filename", { vaultDir });
+}
+
+/**
+ * Write the recovery key to `filePath` as a self-describing sheet, returning
+ * where it landed. Rejects a location inside the vault.
+ */
+export function saveRecoveryKey(
+  recoveryKey: string,
+  filePath: string,
+  vaultDir: string,
+): Promise<string> {
+  return invoke("save_recovery_key", { recoveryKey, filePath, vaultDir });
+}
+
+/** Open the OS print dialog for the current window. */
+export function printWindow(): Promise<void> {
+  return invoke("print_window");
+}
+
 // ── Biometric ──────────────────────────────────────────
 
 export function biometricAvailable(): Promise<boolean> {
   return invoke("biometric_available");
 }
 
-export function biometricEnrolled(): Promise<boolean> {
-  return invoke("biometric_enrolled");
+export function biometricEnrolled(vaultDir: string): Promise<boolean> {
+  return invoke("biometric_enrolled", { vaultDir });
 }
 
-export function biometricEnroll(vaultDir: string, mode?: string): Promise<void> {
-  return invoke("biometric_enroll", { vaultDir, mode: mode ?? "primary" });
+export function biometricEnroll(mode?: string): Promise<void> {
+  // The backend scopes the enrolment to the vault it has open; a caller-chosen
+  // directory is not accepted any more.
+  return invoke("biometric_enroll", { mode: mode ?? "primary" });
 }
 
 export function biometricUnlock(vaultDir: string): Promise<void> {
@@ -431,16 +611,15 @@ export function createSecretShare(
   });
 }
 
+/** A share whose key rides in the link's fragment; the server never sees it. */
 export function createPasswordlessPageShare(
   path: string,
   expiresHours: number,
-  recipientEmail: string,
   burnAfterReading?: boolean,
 ): Promise<ShareCreateResult> {
   return invoke("create_passwordless_page_share", {
     path,
     expiresHours,
-    recipientEmail,
     burnAfterReading: burnAfterReading ?? false,
   });
 }
@@ -449,14 +628,12 @@ export function createPasswordlessSecretShare(
   path: string,
   secretLabel: string,
   expiresHours: number,
-  recipientEmail: string,
   burnAfterReading?: boolean,
 ): Promise<ShareCreateResult> {
   return invoke("create_passwordless_secret_share", {
     path,
     secretLabel,
     expiresHours,
-    recipientEmail,
     burnAfterReading: burnAfterReading ?? false,
   });
 }
@@ -596,17 +773,87 @@ export function syncV2ForcePush(): Promise<{
   return invoke("sync_v2_force_push");
 }
 
+/** The two ids a refused sync found: this vault's and the account's. */
+export interface VaultMismatch {
+  local: string;
+  remote: string;
+}
+
+/** What adopting the account's vault id did. */
+export interface AdoptAccountVaultResult {
+  previous_vault_id: string | null;
+  vault_id: string;
+  /** "moved": biometric keys follow the new id; "off": they could not and
+   *  biometric unlock was switched off; "none": nothing was enrolled. */
+  biometric: "moved" | "off" | "none";
+  pushed_version: number | null;
+  /** Set when the id changed but the fresh snapshot did not go up. */
+  push_error: string | null;
+}
+
+/** One step of a fresh-copy push, as the backend reports it starting. */
+export interface SyncProgress {
+  stage: string;
+  /** The size of the copy, once it is known. */
+  bytes: number | null;
+}
+
+/** The event that carries `SyncProgress` while a fresh copy is made. */
+export const VAULT_IDENTITY_PROGRESS_EVENT = "vault-identity-progress";
+
+/**
+ * Make this vault the one the account's sync group was set up for and put
+ * a fresh copy on the server. Needs the master password: the group key is
+ * derived from it and the vault id.
+ */
+export function syncV2AdoptAccountVault(
+  password: string,
+): Promise<AdoptAccountVaultResult> {
+  return invoke("sync_v2_adopt_account_vault", { password });
+}
+
+/** One page a sync merge chose between: the newer `updated_at` was kept. */
+export interface ResolvedPage {
+  path: string;
+  title: string;
+  /** True when the version this device had is the one replaced. */
+  mine_lost: boolean;
+  kept_updated_at: string;
+  lost_updated_at: string;
+}
+
+/** A resolved page as recorded in the sync state until dismissed, and after. */
+export interface MergeNotice extends ResolvedPage {
+  id: number;
+  at: string;
+  version: number;
+  dismissed: boolean;
+}
+
 export function syncV2Pull(): Promise<{
   versions_applied: number[];
   commits_applied: number;
   conflicts: string[];
+  resolved: ResolvedPage[];
 }> {
   return invoke("sync_v2_pull");
+}
+
+export function syncV2MergeNotices(): Promise<MergeNotice[]> {
+  return invoke("sync_v2_merge_notices");
+}
+
+export function syncV2DismissMergeNotices(): Promise<void> {
+  return invoke("sync_v2_dismiss_merge_notices");
 }
 
 export function syncV2Status(): Promise<{
   configured: boolean;
   engine_active: boolean;
+  merge_notices_pending?: number;
+  /** Set while sync refuses to run because the account's group was set
+   *  up for another vault. */
+  vault_mismatch?: VaultMismatch | null;
   backend?: string;
   group_id?: string;
   device_id?: string;
@@ -658,6 +905,7 @@ export function accountLinkVerify(
   pendingId: string,
   code: string,
   serverUrl: string,
+  deviceId: string,
 ): Promise<{
   license_token: string;
   tier: string;
@@ -665,8 +913,10 @@ export function accountLinkVerify(
   current_version: number;
   max_devices: number;
   device_count: number;
+  /** The group key wrapped under the master key, for a recovery-key restore; null until a desktop publishes it. */
+  restore_key: string | null;
 }> {
-  return invoke("account_link_verify", { pendingId, code, serverUrl });
+  return invoke("account_link_verify", { pendingId, code, serverUrl, deviceId });
 }
 
 export function restoreSetupSync(
@@ -694,6 +944,21 @@ export function restoreFromServer(args: {
   vaultDir: string;
 }): Promise<{ ok: boolean; vault_id: string; pulled_version: number }> {
   return invoke("restore_from_server", args);
+}
+
+/** Restore with the recovery key instead of the password; the vault is put under `newPassword`. */
+export function restoreWithRecoveryKey(args: {
+  email: string;
+  recoveryKey: string;
+  newPassword: string;
+  restoreKey: string;
+  licenseToken: string;
+  deviceId: string;
+  tier: string;
+  serverUrl: string;
+  vaultDir: string;
+}): Promise<{ ok: boolean; vault_id: string; pulled_version: number }> {
+  return invoke("restore_with_recovery_key", args);
 }
 
 // ── Local API ─────────────────────────────────────────
@@ -1214,6 +1479,21 @@ export function deleteAutomationRule(ruleId: string): Promise<void> {
   return invoke("delete_automation_rule", { ruleId });
 }
 
+/** A template the owner saved in Settings › Automation › Templates. */
+export interface SavedSecretTemplate {
+  id: string;
+  name: string;
+  icon: string;
+  fields: { key: string; label: string; field_type: string; required: boolean }[];
+  use_count: number;
+  created_at: string;
+}
+
+/** The owner's saved templates; the built-in ones live in the shared list. */
+export function getTemplates(): Promise<SavedSecretTemplate[]> {
+  return invoke("get_templates");
+}
+
 export function saveTemplate(template: {
   id: string;
   name: string;
@@ -1248,4 +1528,25 @@ export function saveVaultStatsSnapshot(snapshot: {
   tag_counts: { tag: string; count: number }[];
 }): Promise<void> {
   return invoke("save_vault_stats_snapshot", { snapshot });
+}
+
+/** One passkey in the vault, as the settings screen lists it. Never the key. */
+export interface PasskeySummary {
+  page_path: string;
+  label: string;
+  rp_id: string;
+  rp_name: string;
+  credential_id: string;
+  user_name: string;
+  user_display_name: string;
+  created: string;
+  last_used: string | null;
+}
+
+export function listPasskeys(): Promise<PasskeySummary[]> {
+  return invoke("list_passkeys");
+}
+
+export function deletePasskey(pagePath: string, credentialId: string): Promise<void> {
+  return invoke("delete_passkey", { pagePath, credentialId });
 }

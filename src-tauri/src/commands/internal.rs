@@ -35,6 +35,11 @@ fn get_vault_dir(state: &State<VaultState>) -> Result<std::path::PathBuf, String
         .ok_or_else(|| "Vault not open".to_string())
 }
 
+/// The master key, which the sealed journals are read and written under.
+fn get_master_key(state: &State<VaultState>) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    state.master_key().ok_or_else(|| "Vault locked".to_string())
+}
+
 // ── Share Audit Log ──────────────────────────────
 
 /// Return the full share audit log (records of every share created from this vault).
@@ -42,7 +47,8 @@ fn get_vault_dir(state: &State<VaultState>) -> Result<std::path::PathBuf, String
 #[tauri::command]
 pub fn get_share_log(state: State<VaultState>) -> Result<Vec<share_log::ShareLogEntry>, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(share_log::get_share_log(&vd))
+    let key = get_master_key(&state)?;
+    Ok(share_log::get_share_log(&vd, &key))
 }
 
 /// Append a new entry to the share audit log. Errors surface as stringified I/O errors.
@@ -50,7 +56,8 @@ pub fn get_share_log(state: State<VaultState>) -> Result<Vec<share_log::ShareLog
 #[tauri::command]
 pub fn log_share(state: State<VaultState>, entry: share_log::ShareLogEntry) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    share_log::log_share(&vd, &entry).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    share_log::log_share(&vd, &key, &entry).map_err(|e| e.to_string())
 }
 
 /// Mark a logged share (by `share_id`) as having been accessed by its recipient.
@@ -58,7 +65,8 @@ pub fn log_share(state: State<VaultState>, entry: share_log::ShareLogEntry) -> R
 #[tauri::command]
 pub fn mark_share_accessed(state: State<VaultState>, share_id: String) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    share_log::mark_accessed(&vd, &share_id).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    share_log::mark_accessed(&vd, &key, &share_id).map_err(|e| e.to_string())
 }
 
 /// Mark a logged share (by `share_id`) as revoked.
@@ -66,7 +74,8 @@ pub fn mark_share_accessed(state: State<VaultState>, share_id: String) -> Result
 #[tauri::command]
 pub fn mark_share_revoked(state: State<VaultState>, share_id: String) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    share_log::mark_revoked(&vd, &share_id).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    share_log::mark_revoked(&vd, &key, &share_id).map_err(|e| e.to_string())
 }
 
 // ── Credential Usage Journal ─────────────────────
@@ -78,7 +87,8 @@ pub fn log_credential_usage(
     entry: usage_journal::UsageEntry,
 ) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    usage_journal::log_usage(&vd, &entry).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    usage_journal::log_usage(&vd, &key, &entry).map_err(|e| e.to_string())
 }
 
 /// Return the full credential usage journal.
@@ -87,7 +97,8 @@ pub fn get_usage_journal(
     state: State<VaultState>,
 ) -> Result<Vec<usage_journal::UsageEntry>, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(usage_journal::get_usage_journal(&vd))
+    let key = get_master_key(&state)?;
+    Ok(usage_journal::get_usage_journal(&vd, &key))
 }
 
 /// Return the `limit` most recently used credentials from the usage journal.
@@ -97,7 +108,8 @@ pub fn get_recently_used(
     limit: usize,
 ) -> Result<Vec<usage_journal::UsageEntry>, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(usage_journal::get_recently_used(&vd, limit))
+    let key = get_master_key(&state)?;
+    Ok(usage_journal::get_recently_used(&vd, &key, limit))
 }
 
 /// Find credentials not used within the last `days` days.
@@ -108,7 +120,8 @@ pub fn find_stale_credentials(
     days: i64,
 ) -> Result<Vec<(String, String, String)>, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(usage_journal::find_stale_credentials(&vd, days))
+    let key = get_master_key(&state)?;
+    Ok(usage_journal::find_stale_credentials(&vd, &key, days))
 }
 
 // ── Device Registry ──────────────────────────────
@@ -150,7 +163,8 @@ pub fn get_security_alerts(
     state: State<VaultState>,
 ) -> Result<Vec<security_alerts::SecurityAlert>, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(security_alerts::get_active_alerts(&vd))
+    let key = get_master_key(&state)?;
+    Ok(security_alerts::get_active_alerts(&vd, &key))
 }
 
 /// Return all security alerts, including dismissed and resolved ones.
@@ -159,7 +173,8 @@ pub fn get_all_security_alerts(
     state: State<VaultState>,
 ) -> Result<Vec<security_alerts::SecurityAlert>, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(security_alerts::get_alerts(&vd))
+    let key = get_master_key(&state)?;
+    Ok(security_alerts::get_alerts(&vd, &key))
 }
 
 /// Persist a new security alert.
@@ -169,21 +184,24 @@ pub fn add_security_alert(
     alert: security_alerts::SecurityAlert,
 ) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    security_alerts::add_alert(&vd, &alert).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    security_alerts::add_alert(&vd, &key, &alert).map_err(|e| e.to_string())
 }
 
 /// Dismiss a security alert by `alert_id` (hides it but keeps it on record).
 #[tauri::command]
 pub fn dismiss_security_alert(state: State<VaultState>, alert_id: String) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    security_alerts::dismiss_alert(&vd, &alert_id).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    security_alerts::dismiss_alert(&vd, &key, &alert_id).map_err(|e| e.to_string())
 }
 
 /// Mark a security alert (by `alert_id`) as resolved.
 #[tauri::command]
 pub fn resolve_security_alert(state: State<VaultState>, alert_id: String) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    security_alerts::resolve_alert(&vd, &alert_id).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    security_alerts::resolve_alert(&vd, &key, &alert_id).map_err(|e| e.to_string())
 }
 
 // ── Password Health ──────────────────────────────
@@ -195,7 +213,8 @@ pub fn save_health_snapshot(
     snapshot: security_alerts::PasswordHealthSnapshot,
 ) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    security_alerts::save_health_snapshot(&vd, &snapshot).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    security_alerts::save_health_snapshot(&vd, &key, &snapshot).map_err(|e| e.to_string())
 }
 
 /// Return the stored history of password-health snapshots.
@@ -204,7 +223,8 @@ pub fn get_health_history(
     state: State<VaultState>,
 ) -> Result<Vec<security_alerts::PasswordHealthSnapshot>, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(security_alerts::get_health_history(&vd))
+    let key = get_master_key(&state)?;
+    Ok(security_alerts::get_health_history(&vd, &key))
 }
 
 /// Return the most recent password-health snapshot, if any.
@@ -213,7 +233,8 @@ pub fn get_latest_health(
     state: State<VaultState>,
 ) -> Result<Option<security_alerts::PasswordHealthSnapshot>, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(security_alerts::get_latest_health(&vd))
+    let key = get_master_key(&state)?;
+    Ok(security_alerts::get_latest_health(&vd, &key))
 }
 
 // ── Extension Preferences ────────────────────────
@@ -224,7 +245,8 @@ pub fn get_extension_prefs(
     state: State<VaultState>,
 ) -> Result<extension_prefs::ExtensionPrefs, String> {
     let vd = get_vault_dir(&state)?;
-    Ok(extension_prefs::get_prefs(&vd))
+    let key = get_master_key(&state)?;
+    Ok(extension_prefs::get_prefs(&vd, &key))
 }
 
 /// Persist the browser-extension preferences for this vault.
@@ -234,18 +256,20 @@ pub fn save_extension_prefs(
     prefs: extension_prefs::ExtensionPrefs,
 ) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    extension_prefs::save_prefs(&vd, &prefs).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    extension_prefs::save_prefs(&vd, &key, &prefs).map_err(|e| e.to_string())
 }
 
 // ── Templates ────────────────────────────────────
 
-/// List available secret templates: the built-in defaults plus any user-defined ones.
+/// The owner's saved secret templates. The built-in ones live in the shared
+/// list the desktop picker and the extension both read; keeping a second copy
+/// here is how the two drifted apart.
 #[tauri::command]
 pub fn get_templates(state: State<VaultState>) -> Result<Vec<templates::SecretTemplate>, String> {
     let vd = get_vault_dir(&state)?;
-    let mut all = templates::default_templates();
-    all.extend(templates::get_templates(&vd));
-    Ok(all)
+    let key = get_master_key(&state)?;
+    Ok(templates::get_templates(&vd, &key))
 }
 
 /// Create or update a user-defined secret template.
@@ -255,14 +279,16 @@ pub fn save_template(
     template: templates::SecretTemplate,
 ) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    templates::save_template(&vd, &template).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    templates::save_template(&vd, &key, &template).map_err(|e| e.to_string())
 }
 
 /// Delete a user-defined secret template by id.
 #[tauri::command]
 pub fn delete_template(state: State<VaultState>, template_id: String) -> Result<(), String> {
     let vd = get_vault_dir(&state)?;
-    templates::delete_template(&vd, &template_id).map_err(|e| e.to_string())
+    let key = get_master_key(&state)?;
+    templates::delete_template(&vd, &key, &template_id).map_err(|e| e.to_string())
 }
 
 // ── Automation Rules ─────────────────────────────
@@ -349,16 +375,16 @@ pub fn save_vault_stats_snapshot(
 #[tauri::command]
 pub fn run_security_scan(state: State<VaultState>) -> Result<u32, String> {
     let vd = get_vault_dir(&state)?;
-    let key = state.master_key().ok_or("Vault locked")?;
+    let key = get_master_key(&state)?;
 
     let report = crate::utilities::health::password_health(&vd, &key).map_err(|e| e.to_string())?;
 
     // Clear old non-dismissed alerts of these types to avoid duplicates
-    let existing = security_alerts::get_alerts(&vd);
+    let existing = security_alerts::get_alerts(&vd, &key);
     let auto_types = ["weak_password", "reused_password"];
     for alert in &existing {
         if auto_types.contains(&alert.alert_type.as_str()) && !alert.dismissed {
-            let _ = security_alerts::resolve_alert(&vd, &alert.id);
+            let _ = security_alerts::resolve_alert(&vd, &key, &alert.id);
         }
     }
 
@@ -374,7 +400,7 @@ pub fn run_security_scan(state: State<VaultState>) -> Result<u32, String> {
                     entry.label_text, entry.score, entry.crack_time
                 ),
             ).for_credential(&entry.page_path, &entry.label);
-            let _ = security_alerts::add_alert(&vd, &alert);
+            let _ = security_alerts::add_alert(&vd, &key, &alert);
             count += 1;
         }
         if entry.reused {
@@ -384,7 +410,7 @@ pub fn run_security_scan(state: State<VaultState>) -> Result<u32, String> {
                 &format!("Reused password: {}", entry.label),
                 "This password is used in multiple credentials. If one account is compromised, all accounts sharing this password are at risk.",
             ).for_credential(&entry.page_path, &entry.label);
-            let _ = security_alerts::add_alert(&vd, &alert);
+            let _ = security_alerts::add_alert(&vd, &key, &alert);
             count += 1;
         }
     }
@@ -419,7 +445,7 @@ pub fn run_security_scan(state: State<VaultState>) -> Result<u32, String> {
             .collect(),
         compromised_credentials: vec![],
     };
-    let _ = security_alerts::save_health_snapshot(&vd, &snapshot);
+    let _ = security_alerts::save_health_snapshot(&vd, &key, &snapshot);
 
     Ok(count)
 }

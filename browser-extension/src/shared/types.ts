@@ -154,6 +154,36 @@ export interface Credential {
   url?: string;
   /** Relevance score from URL matching (higher = better match) */
   score?: number;
+  /** The page's tags, so a capture not yet confirmed can be told apart. */
+  tags?: string[];
+  /** Taken into the vault at submit time and not yet confirmed by the owner. */
+  captured?: boolean;
+}
+
+/** A login taken straight into the vault at submit time, not yet confirmed. */
+export interface CapturedItem {
+  pagePath: string;
+  title: string;
+  username: string;
+  domain: string;
+  url: string;
+  capturedAt: string;
+}
+
+/** What happened to the last submission on a site. */
+export type CaptureOutcome =
+  | "captured"
+  | "parked"
+  | "already_saved"
+  | "never_save"
+  | "excluded"
+  | "failed";
+
+export interface LastCapture {
+  outcome: CaptureOutcome;
+  username: string;
+  at: number;
+  pagePath?: string;
 }
 
 /** Search result from /api/search */
@@ -203,11 +233,29 @@ export interface DomainPref {
 /** Messages between popup/content and background */
 export type Message =
   | { type: "GET_STATUS" }
-  | { type: "STATUS_RESULT"; connected: boolean; vaultUnlocked: boolean; version?: string; vaultFormatVersion?: number; vaultSyncVersion?: number; plan?: string; permissionNeeded?: boolean; features?: ApiFeatures }
+  | {
+      type: "STATUS_RESULT";
+      connected: boolean;
+      vaultUnlocked: boolean;
+      version?: string;
+      vaultFormatVersion?: number;
+      vaultSyncVersion?: number;
+      plan?: string;
+      permissionNeeded?: boolean;
+      desktopTooOld?: boolean;
+      /** The app is running but does not know this extension's token. */
+      tokenRejected?: boolean;
+      features?: ApiFeatures;
+    }
   | { type: "CHECK_HOST_PERMISSION" }
   | { type: "HOST_PERMISSION_RESULT"; granted: boolean }
   | { type: "GET_CREDENTIALS"; domain: string }
-  | { type: "CREDENTIALS_RESULT"; credentials: Credential[] }
+  | {
+      type: "CREDENTIALS_RESULT";
+      credentials: Credential[];
+      /** Why the list may be empty, so the picker can say so instead of "no matches". */
+      reason?: Exclude<ConnectionState, "connected">;
+    }
   | { type: "SEARCH_CREDENTIALS"; query: string }
   | { type: "SEARCH_RESULT"; credentials: Credential[] }
   | { type: "COPY_TO_CLIPBOARD"; text: string; autoClear: boolean }
@@ -221,7 +269,9 @@ export type Message =
   | {
       type: "PASSKEY_RESULT";
       outcome: "done" | "fallback" | "error";
-      result?: import("./passkey-codec").RegistrationResult | import("./passkey-codec").AssertionResult;
+      result?:
+        | import("./passkey-codec").RegistrationResult
+        | import("./passkey-codec").AssertionResult;
       error?: string;
     }
   | { type: "PASSKEY_CHOOSE"; candidates: import("./passkey-codec").PasskeyCandidate[] }
@@ -234,15 +284,46 @@ export type Message =
       type: "PAIR_RESULT";
       ok: boolean;
       /** Why it failed, when it did. */
-      reason?: "not-open" | "unreachable" | "no-permission";
+      reason?: "not-open" | "desktop-too-old" | "unreachable" | "no-permission";
       scope?: "notes" | "secrets";
     }
   | { type: "CONFIG_SAVED" }
-  | { type: "GENERATE_PASSWORD"; length?: number; uppercase?: boolean; lowercase?: boolean; digits?: boolean; symbols?: boolean }
+  | {
+      type: "GENERATE_PASSWORD";
+      length?: number;
+      uppercase?: boolean;
+      lowercase?: boolean;
+      digits?: boolean;
+      symbols?: boolean;
+    }
   | { type: "PASSWORD_RESULT"; password: string }
+  | { type: "GET_PASSKEYS"; domain: string }
+  | { type: "PASSKEYS_RESULT"; count: number; accounts: string[] }
+  | { type: "CLIPBOARD_WRITTEN"; ok: boolean }
+  | { type: "SCAN_QR" }
+  | {
+      type: "QR_SCAN_RESULT";
+      found: boolean;
+      uri?: string;
+      issuer?: string;
+      account?: string;
+      reason?: "no-qr" | "not-totp" | "capture-failed";
+    }
   | { type: "GENERATE_TOTP"; secret: string }
-  | { type: "TOTP_RESULT"; code: string; remaining: number }
-  | { type: "SAVE_CREDENTIAL"; username: string; password: string; url: string; domain: string }
+  | { type: "TOTP_RESULT"; code: string; remaining: number; period: number }
+  | {
+      type: "SAVE_CREDENTIAL";
+      username: string;
+      password: string;
+      url: string;
+      domain: string;
+      /** From the Add new form: the block label, every field by its written
+       *  name, and the template's tag. Absent from the content script's
+       *  save bar, which knows only a login. */
+      label?: string;
+      fields?: Record<string, string>;
+      template?: string;
+    }
   | { type: "SAVE_CREDENTIAL_RESULT"; success: boolean }
   | { type: "CHECK_EXISTING"; domain: string }
   | { type: "CHECK_EXISTING_RESULT"; credentials: Credential[] }
@@ -257,31 +338,155 @@ export type Message =
   | { type: "UPDATE_IDENTITY_RESULT"; success: boolean }
   | { type: "LIST_IDENTITIES" }
   | { type: "LIST_IDENTITIES_RESULT"; items: IdentityItem[] }
+  /**
+   * Fill personal details into the page's address or signup form.
+   *
+   * This was sent by the popup for a long time with nothing listening for it
+   * and no entry here, so the Fill button did nothing at all. `chrome.tabs
+   * .sendMessage` takes `any`, so neither the compiler nor a test noticed.
+   */
+  | { type: "FILL_IDENTITY"; identity: Record<string, string>; pagePath?: string }
+  | { type: "FILL_IDENTITY_RESULT"; filled: number }
+  /**
+   * Remember which identity was used on a site, so the next visit offers it
+   * first. Only the page path is kept — a reference into the vault, never a
+   * name, address or any other value.
+   */
+  | { type: "REMEMBER_IDENTITY_FOR_SITE"; host: string; pagePath: string }
+  | { type: "IDENTITY_FOR_SITE"; host: string }
+  | { type: "IDENTITY_FOR_SITE_RESULT"; pagePath: string | null }
+  /** Identities for the in-field picker: no cards, best match for this site first. */
+  | { type: "LIST_IDENTITIES_FOR_SITE"; host: string }
+  | {
+      type: "LIST_IDENTITIES_FOR_SITE_RESULT";
+      items: Array<{ pagePath: string; title: string; fields: Record<string, string> }>;
+    }
   | { type: "OPEN_IN_DESKTOP"; pagePath: string }
   | { type: "OPEN_IN_DESKTOP_RESULT"; success: boolean }
   | { type: "TRIGGER_GENERATE_INTO_FIELD"; tabId?: number }
   // ── v2.0.0 granular CRUD (uses the new desktop API endpoints) ──
-  | { type: "PATCH_SECRET_BLOCK"; pagePath: string; label: string; fields: Record<string, string>; deleteFields?: string[]; ifMatch?: string }
+  | {
+      type: "PATCH_SECRET_BLOCK";
+      pagePath: string;
+      label: string;
+      fields: Record<string, string>;
+      deleteFields?: string[];
+      ifMatch?: string;
+    }
   // ── Generated-password history (vault-backed) ──
   | { type: "RECORD_GENERATED_PASSWORD"; password: string; site?: string }
-  | { type: "RECORD_GENERATED_PASSWORD_RESULT"; success: boolean; pagePath?: string; label?: string }
+  | {
+      type: "RECORD_GENERATED_PASSWORD_RESULT";
+      success: boolean;
+      pagePath?: string;
+      label?: string;
+      /** The vault was out of reach; the worker holds the password until it is back. */
+      parked?: boolean;
+    }
+  // ── Session records held by the worker for content scripts ──
+  // Content scripts cannot touch session storage themselves: the worker owns
+  // it and binds every record to the site the sender is on.
+  | { type: "PENDING_SAVE_SET"; credentials: Omit<PendingSave, "timestamp" | "domain"> }
+  | { type: "PENDING_SAVE_GET" }
+  | { type: "PENDING_SAVE_RESULT"; pending: PendingSave | null }
+  | { type: "PENDING_SAVE_CLEAR" }
+  | { type: "PENDING_SAVE_PARK" }
+  | { type: "STEP_USERNAME_SET"; value: string }
+  | { type: "STEP_USERNAME_GET" }
+  | { type: "STEP_USERNAME_CLEAR" }
+  | { type: "STEP_USERNAME_RESULT"; value: string | null }
+  | { type: "SESSION_OK"; ok: boolean }
   | { type: "MARK_GENERATED_USED"; pagePath: string; label: string }
   | { type: "MARK_GENERATED_USED_RESULT"; success: boolean }
   | { type: "LIST_GENERATED_PASSWORDS" }
   | { type: "LIST_GENERATED_PASSWORDS_RESULT"; entries: StoredGeneratedEntry[] }
   | { type: "CLEAR_UNUSED_GENERATED"; days: number }
   | { type: "CLEAR_UNUSED_GENERATED_RESULT"; success: boolean; removed: number }
-  | { type: "PATCH_SECRET_BLOCK_RESULT"; success: boolean; etag?: string | null; errorCode?: string; errorMessage?: string }
-  | { type: "DELETE_SECRET_BLOCK"; pagePath: string; label: string; deletePageIfEmpty?: boolean; ifMatch?: string }
-  | { type: "DELETE_SECRET_BLOCK_RESULT"; success: boolean; pageDeleted?: boolean; errorCode?: string; errorMessage?: string }
-  | { type: "RENAME_SECRET_BLOCK"; pagePath: string; oldLabel: string; newLabel: string; ifMatch?: string }
-  | { type: "RENAME_SECRET_BLOCK_RESULT"; success: boolean; etag?: string | null; errorCode?: string; errorMessage?: string }
+  | {
+      type: "PATCH_SECRET_BLOCK_RESULT";
+      success: boolean;
+      etag?: string | null;
+      errorCode?: string;
+      errorMessage?: string;
+    }
+  | {
+      type: "DELETE_SECRET_BLOCK";
+      pagePath: string;
+      label: string;
+      deletePageIfEmpty?: boolean;
+      ifMatch?: string;
+    }
+  | {
+      type: "DELETE_SECRET_BLOCK_RESULT";
+      success: boolean;
+      pageDeleted?: boolean;
+      errorCode?: string;
+      errorMessage?: string;
+    }
+  | {
+      type: "RENAME_SECRET_BLOCK";
+      pagePath: string;
+      oldLabel: string;
+      newLabel: string;
+      ifMatch?: string;
+    }
+  | {
+      type: "RENAME_SECRET_BLOCK_RESULT";
+      success: boolean;
+      etag?: string | null;
+      errorCode?: string;
+      errorMessage?: string;
+    }
   | { type: "MOVE_PAGE"; pagePath: string; folder: string }
-  | { type: "MOVE_PAGE_RESULT"; success: boolean; newPath?: string; errorCode?: string; errorMessage?: string }
+  | {
+      type: "MOVE_PAGE_RESULT";
+      success: boolean;
+      newPath?: string;
+      errorCode?: string;
+      errorMessage?: string;
+    }
   | { type: "LIST_FOLDERS" }
-  | { type: "LIST_FOLDERS_RESULT"; success: boolean; folders: string[]; errorCode?: string; errorMessage?: string }
+  | {
+      type: "LIST_FOLDERS_RESULT";
+      success: boolean;
+      folders: string[];
+      errorCode?: string;
+      errorMessage?: string;
+    }
+  /**
+   * A submitted login goes into the vault the moment it is captured, as a
+   * page tagged "captured", so no redirect, second factor, lock or crash can
+   * lose it. Confirm keeps it as an ordinary login; discard sends it to the
+   * trash. From a page, only the site the browser says the message came from.
+   */
+  | { type: "CAPTURE_LOGIN"; username: string; password: string; url: string; isSignup: boolean }
+  | {
+      type: "CAPTURE_RESULT";
+      success: boolean;
+      pagePath?: string;
+      /** Held in memory until the desktop is reachable again. */
+      parked?: boolean;
+      /** The password went onto a capture for the same account already there. */
+      updatedExisting?: boolean;
+    }
+  /** Without a page path: the capture parked for the sender's site and this account. */
+  | { type: "CONFIRM_CAPTURE"; pagePath?: string; username?: string; title?: string }
+  | { type: "CONFIRM_CAPTURE_RESULT"; success: boolean }
+  | { type: "DISCARD_CAPTURE"; pagePath?: string; username?: string }
+  | { type: "DISCARD_CAPTURE_RESULT"; success: boolean }
+  | { type: "LIST_CAPTURED" }
+  | { type: "CAPTURED_RESULT"; items: CapturedItem[]; parked: number }
+  | { type: "LAST_CAPTURE_SET"; capture: Omit<LastCapture, "at"> }
+  | { type: "LAST_CAPTURE_GET"; domain?: string }
+  | { type: "LAST_CAPTURE_RESULT"; capture: LastCapture | null }
   | { type: "GET_PAGE_WITH_ETAG"; pagePath: string }
-  | { type: "GET_PAGE_WITH_ETAG_RESULT"; success: boolean; page?: Page; etag?: string | null; errorCode?: string };
+  | {
+      type: "GET_PAGE_WITH_ETAG_RESULT";
+      success: boolean;
+      page?: Page;
+      etag?: string | null;
+      errorCode?: string;
+    };
 
 /** A grouped identity or credit card item — one per page in identities/ folder. */
 export interface IdentityItem {
@@ -305,7 +510,14 @@ export interface IdentityProfile {
 }
 
 /** Connection state for the popup UI */
-export type ConnectionState = "connected" | "disconnected" | "vault_locked" | "permission_needed";
+export type ConnectionState =
+  | "connected"
+  | "disconnected"
+  | "vault_locked"
+  | "permission_needed"
+  | "desktop_too_old"
+  /** The app answered and refused this extension's token: pair again. */
+  | "unauthorized";
 
 /**
  * A one-shot "log me in" job from the desktop: an agent asked, the owner
@@ -319,4 +531,29 @@ export interface LoginJob {
   submit: boolean;
   requestedBy: string;
   credential: Credential;
+}
+
+/**
+ * A login captured on a page and not yet saved. Held by the background
+ * worker in memory-backed session storage while a redirect or a second
+ * factor completes, then offered again on the same site only.
+ */
+export interface PendingSave {
+  username: string;
+  password: string;
+  url: string;
+  domain: string;
+  isSignup: boolean;
+  timestamp: number;
+  /** Where the capture was written in the vault, once it was. */
+  pagePath?: string;
+}
+
+/** A captured login the user dismissed without saving; listed in the popup. */
+export interface UnsavedCredential {
+  username: string;
+  password: string;
+  url: string;
+  domain: string;
+  timestamp: number;
 }

@@ -31,3 +31,4 @@ pub mod model;
 pub mod passkeys;
 pub mod secret;
 pub mod secret_guard;
+pub mod trash;

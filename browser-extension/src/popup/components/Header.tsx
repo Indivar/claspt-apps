@@ -3,9 +3,12 @@
 
 import React, { useCallback, useRef, useState } from "react";
 import { toggleDebug, isDebugEnabled } from "@/shared/debug";
+import { isPaidPlan, planLabel } from "@/shared/plan-label";
+import { desktopTooOldMessage } from "@/shared/desktop-version";
+import type { ConnectionState } from "@/shared/types";
 
 interface HeaderProps {
-  connection: "connected" | "vault_locked" | "disconnected" | "permission_needed";
+  connection: ConnectionState;
   matchCount: number;
   desktopVersion?: string;
   vaultSyncVersion?: number;
@@ -50,11 +53,11 @@ export function Header({
               <span className="text-sm font-bold text-text-primary tracking-tight leading-none">Claspt</span>
               {plan && (
                 <span className={`rounded-full px-1.5 py-px text-[9px] font-semibold leading-none ${
-                  plan === "Free" || plan === "Trial"
-                    ? "bg-surface-raised text-text-muted"
-                    : "bg-accent/15 text-accent"
+                  isPaidPlan(plan)
+                    ? "bg-accent/15 text-accent"
+                    : "bg-surface-raised text-text-muted"
                 }`}>
-                  {plan === "pro_plus" ? "Pro+" : plan === "pro" ? "Pro" : plan}
+                  {planLabel(plan)}
                 </span>
               )}
             </span>
@@ -99,6 +102,22 @@ export function Header({
                 <path d="M8 1a4 4 0 00-4 4v2H3a1 1 0 00-1 1v6a1 1 0 001 1h10a1 1 0 001-1V8a1 1 0 00-1-1h-1V5a4 4 0 00-4-4zm-2 4a2 2 0 114 0v2H6V5z" />
               </svg>
               Vault locked — open Claspt to unlock
+            </>
+          ) : connection === "desktop_too_old" ? (
+            <>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="shrink-0" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <circle cx="8" cy="8" r="6" />
+                <path d="M8 4.5v4M8 11v.5" />
+              </svg>
+              {desktopTooOldMessage(desktopVersion)}
+            </>
+          ) : connection === "unauthorized" ? (
+            <>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="shrink-0" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <rect x="2" y="7" width="12" height="7" rx="1.5" />
+                <path d="M5 7V4.5a3 3 0 016 0V7" />
+              </svg>
+              Claspt does not know this extension's key. Pair again from Settings › Integrations in the app.
             </>
           ) : connection === "permission_needed" ? (
             <>

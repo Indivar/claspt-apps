@@ -12,10 +12,11 @@
 //   node scripts/check-headers.mjs          exit 1 and list files that are wrong
 //   node scripts/check-headers.mjs --fix    insert or correct headers in place
 //
-// Runs over `git ls-files`, so generated and ignored trees never count.
+// Runs over `git ls-files`, so generated and ignored trees never count; outside a
+// repository it walks the directory and skips the same trees by name.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 
 const OWNER = "Indivar Software Solutions Limited, Auckland, New Zealand";
 const FIRST_YEAR = 2025;
@@ -31,10 +32,15 @@ const PRIVATE_TERMS =
  * header stamped on a file and the public export in phase 8 can never
  * disagree about where the boundary is.
  */
-const PRIVATE_PREFIXES = readFileSync(".publicignore", "utf8")
-  .split("\n")
-  .map((l) => l.trim())
-  .filter((l) => l && !l.startsWith("#"));
+// The public repository has no `.publicignore`: every path there is public by
+// definition and there is nothing to keep back, so its absence means "no
+// private prefixes", the same reading the pre-commit hook takes.
+const PRIVATE_PREFIXES = existsSync(".publicignore")
+  ? readFileSync(".publicignore", "utf8")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"))
+  : [];
 
 const EXTENSIONS = new Set([
   "rs",
@@ -138,10 +144,36 @@ function render(path, parsed, wanted) {
   return text;
 }
 
+/**
+ * Every file under the tree, for a directory that is not a repository.
+ * The exported public tree is one such directory until it is published, and
+ * the public CI checks headers there before any commit exists. Generated
+ * and dependency trees are skipped, which is what `git ls-files` gave us.
+ */
+function walkFiles(dir, prefix = "") {
+  const skip = new Set(["node_modules", "target", "dist", ".git", "build"]);
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (skip.has(entry.name)) continue;
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) out.push(...walkFiles(`${dir}/${entry.name}`, rel));
+    else if (entry.isFile()) out.push(rel);
+  }
+  return out;
+}
+
 function trackedSourceFiles() {
-  const list = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
-    .split("\0")
-    .filter(Boolean);
+  let list;
+  try {
+    list = execFileSync("git", ["ls-files", "-z"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split("\0")
+      .filter(Boolean);
+  } catch {
+    list = walkFiles(".");
+  }
   return list.filter((p) => {
     const ext = p.slice(p.lastIndexOf(".") + 1);
     if (!EXTENSIONS.has(ext)) return false;

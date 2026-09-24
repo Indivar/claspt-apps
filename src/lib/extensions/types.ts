@@ -35,12 +35,7 @@ export type ExtensionId =
 
 /** Categories for grouping extensions in UI. */
 export type ExtensionCategory =
-  | "core"
-  | "science"
-  | "diagrams"
-  | "media"
-  | "planning"
-  | "document";
+  "core" | "science" | "diagrams" | "media" | "planning" | "document";
 
 /** Extension metadata and hooks into the preview pipeline. */
 export interface MarkdownExtension {

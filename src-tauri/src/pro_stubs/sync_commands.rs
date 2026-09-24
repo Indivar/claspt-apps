@@ -53,3 +53,11 @@ pub fn init_sync_state(
 }
 
 pub fn close_sync_state(_sync_state: &SyncState) {}
+
+/// No sync, nothing to re-key.
+pub async fn rekey_after_password_change(
+    _sync_v2: &SyncV2Managed,
+    _vault_state: &super::crypto::VaultState,
+) -> Result<(), String> {
+    Ok(())
+}

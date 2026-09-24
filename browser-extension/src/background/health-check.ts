@@ -3,6 +3,7 @@
 
 import type { ApiClient } from "./api-client";
 import type { ApiFeatures, ConnectionState } from "@/shared/types";
+import { ApiError } from "./api-client";
 
 /**
  * Periodic health check against /api/status.
@@ -70,13 +71,17 @@ export class HealthCheck {
         this.state = "vault_locked";
         this.updateBadge("vault_locked");
       }
-    } catch {
-      this.state = "disconnected";
+    } catch (error) {
+      // A 401 is the app answering: it is running, and it does not know
+      // this token. Calling that "not connected" sent people to start an
+      // app that was already open; the fix is to pair again.
+      const refused = error instanceof ApiError && error.status === 401;
+      this.state = refused ? "unauthorized" : "disconnected";
       this.version = undefined;
       this.vaultFormatVersion = undefined;
       this.vaultSyncVersion = undefined;
       this.features = undefined;
-      this.updateBadge("disconnected");
+      this.updateBadge(this.state);
     }
 
     return this.state;
@@ -88,6 +93,8 @@ export class HealthCheck {
       vault_locked: { text: "!", color: "#eab308" },       // yellow warning
       disconnected: { text: "X", color: "#ef4444" },       // red
       permission_needed: { text: "?", color: "#3b82f6" },  // blue — needs user action
+      desktop_too_old: { text: "↑", color: "#eab308" },    // yellow — update the desktop app
+      unauthorized: { text: "!", color: "#eab308" },       // yellow — pair again
     };
     const { text, color } = config[state];
     chrome.action.setBadgeText({ text });

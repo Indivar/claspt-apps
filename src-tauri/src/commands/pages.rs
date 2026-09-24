@@ -20,6 +20,7 @@ use crate::pages::error::PageError;
 use crate::pages::media::{self, MediaFile};
 use crate::pages::model::{Page, PageSummary, SecretSummary};
 use crate::pages::secret;
+use crate::pages::trash;
 
 fn get_vault_dir(state: &State<VaultState>) -> Result<std::path::PathBuf, PageError> {
     state.vault_dir().ok_or(PageError::VaultNotOpen)
@@ -149,19 +150,57 @@ pub fn delete_page(
     state: State<VaultState>,
     search_state: State<SearchState>,
     git_state: State<GitState>,
-) -> Result<(), PageError> {
+) -> Result<trash::TrashEntry, PageError> {
     let vault_dir = get_vault_dir(&state)?;
     // Read the page to get its ID and title before deleting
     let page_info = crud::read_page(&vault_dir, &path).ok();
     if let Some(ref page) = page_info {
         remove_page_if_active(&page.meta.id, &search_state);
     }
-    crud::delete_page(&vault_dir, &path)?;
+    let entry = crud::delete_page(&vault_dir, &path)?;
     // Record deletion for git commit
     if let Some(page) = page_info {
         record_save_if_active(&page.meta.title, &git_state);
     }
-    Ok(())
+    Ok(entry)
+}
+
+/// Everything in the vault's trash, newest first.
+#[tauri::command]
+pub fn trash_list(state: State<VaultState>) -> Result<Vec<trash::TrashEntry>, PageError> {
+    let vault_dir = get_vault_dir(&state)?;
+    trash::list(&vault_dir, trash::retention_for(&vault_dir))
+}
+
+/// Put a trashed page back, index it and record the change for Git.
+#[tauri::command]
+pub fn trash_restore(
+    entry_id: String,
+    state: State<VaultState>,
+    search_state: State<SearchState>,
+    git_state: State<GitState>,
+) -> Result<Page, PageError> {
+    let vault_dir = get_vault_dir(&state)?;
+    let rel_path = trash::restore(&vault_dir, &entry_id)?;
+    let page = crud::read_page(&vault_dir, &rel_path)?;
+    let decrypted = decrypt_page(page, &state)?;
+    index_page_if_active(&decrypted, &search_state);
+    record_save_if_active(&format!("Restored: {}", decrypted.meta.title), &git_state);
+    Ok(decrypted)
+}
+
+/// Remove one trashed page for good. Git still has it.
+#[tauri::command]
+pub fn trash_purge(entry_id: String, state: State<VaultState>) -> Result<(), PageError> {
+    let vault_dir = get_vault_dir(&state)?;
+    trash::purge(&vault_dir, &entry_id)
+}
+
+/// Remove every trashed page for good. Returns how many went.
+#[tauri::command]
+pub fn trash_empty(state: State<VaultState>) -> Result<usize, PageError> {
+    let vault_dir = get_vault_dir(&state)?;
+    trash::empty(&vault_dir, trash::retention_for(&vault_dir))
 }
 
 /// Delete many pages in one operation (recorded as a single Git commit). Returns the
@@ -481,19 +520,59 @@ pub async fn toggle_encryption(
 
 // ── Media ──────────────────────────────────────────────
 
-/// Save raw media `data` (with the given `extension`) into the folder's content-addressed
-/// `_media/` store. Returns the `MediaFile` describing where it landed.
+/// Name, extension and size of a file the owner picked, so the attach dialog
+/// can show the size and apply the vault's limit before anything is read in.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceFileInfo {
+    pub name: String,
+    pub ext: String,
+    pub size: u64,
+}
+
+/// The vault's options for storing one attachment, with the master key when
+/// a sealed file is about to be written.
+type AttachmentOptions = (media::SaveOptions, Option<Zeroizing<Vec<u8>>>);
+
+/// The owner's encrypt answer for this file and the vault's size limit, with
+/// the master key when a sealed file is about to be written.
+fn attachment_options(
+    state: &State<VaultState>,
+    encrypt: bool,
+) -> Result<AttachmentOptions, PageError> {
+    let vault_dir = get_vault_dir(state)?;
+    let limit_mb = crate::vault::init::read_config(&vault_dir)
+        .map(|c| c.attachment_size_limit_mb)
+        .unwrap_or(media::DEFAULT_ATTACHMENT_LIMIT_MB);
+    let key = state.master_key();
+    if encrypt && key.is_none() {
+        return Err(PageError::VaultNotOpen);
+    }
+    Ok((media::SaveOptions::new(encrypt, limit_mb), key))
+}
+
+/// Save raw media `data` (with the given `extension`) into the folder's
+/// content-addressed `_media/` store, sealed under the master key when
+/// `encrypt` is set. Returns the `MediaFile` describing where it landed.
 #[tauri::command]
 pub async fn save_media(
     folder: String,
     data: Vec<u8>,
     extension: String,
+    encrypt: bool,
     state: State<'_, VaultState>,
     git_state: State<'_, GitState>,
 ) -> Result<MediaFile, PageError> {
     let vault_dir = get_vault_dir(&state)?;
+    let (opts, key) = attachment_options(&state, encrypt)?;
     let mf = tokio::task::spawn_blocking(move || {
-        media::save_media(&vault_dir, &folder, &data, &extension)
+        media::save_media(
+            &vault_dir,
+            &folder,
+            &data,
+            &extension,
+            &opts,
+            key.as_ref().map(|k| k.as_slice()),
+        )
     })
     .await
     .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))??;
@@ -501,23 +580,53 @@ pub async fn save_media(
     Ok(mf)
 }
 
-/// Import an existing file from `source_path` on disk into the folder's media store. The
-/// source path is validated before reading. Returns the resulting `MediaFile`.
+/// Import an existing file from `source_path` on disk into the folder's media
+/// store. The source path is validated before reading.
 #[tauri::command]
 pub fn save_media_from_path(
     folder: String,
     source_path: String,
+    encrypt: bool,
     state: State<VaultState>,
     git_state: State<GitState>,
 ) -> Result<MediaFile, PageError> {
     validate_source_path(std::path::Path::new(&source_path))?;
     let vault_dir = get_vault_dir(&state)?;
-    let mf = media::save_media_from_path(&vault_dir, &folder, std::path::Path::new(&source_path))?;
+    let (opts, key) = attachment_options(&state, encrypt)?;
+    let mf = media::save_media_from_path(
+        &vault_dir,
+        &folder,
+        std::path::Path::new(&source_path),
+        &opts,
+        key.as_ref().map(|k| k.as_slice()),
+    )?;
     record_save_if_active(&format!("Added media: {}", mf.md_path), &git_state);
     Ok(mf)
 }
 
-/// Delete a media file by its vault-relative path and record the change for Git.
+/// Name, extension and size of a file the owner picked, before it is read.
+#[tauri::command]
+pub fn stat_source_file(source_path: String) -> Result<SourceFileInfo, PageError> {
+    let path = std::path::Path::new(&source_path);
+    validate_source_path(path)?;
+    let size = std::fs::metadata(path)?.len();
+    Ok(SourceFileInfo {
+        name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        ext: path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase(),
+        size,
+    })
+}
+
+/// Delete a media file by its vault-relative path and record the change for
+/// Git. This removes the file from the current version of the vault only;
+/// every earlier version keeps it, and the attach dialog says so.
 #[tauri::command]
 pub fn delete_media(
     rel_path: String,
@@ -530,8 +639,75 @@ pub fn delete_media(
     Ok(())
 }
 
-/// Resolve a page-relative media reference (`md_path`) within `folder` to an absolute
-/// filesystem path string.
+/// Seal or unseal an attachment in place. The name and every reference stay.
+#[tauri::command]
+pub async fn set_media_sealed(
+    rel_path: String,
+    encrypt: bool,
+    state: State<'_, VaultState>,
+    git_state: State<'_, GitState>,
+) -> Result<MediaFile, PageError> {
+    let vault_dir = get_vault_dir(&state)?;
+    let key = get_master_key(&state)?;
+    let path_for_log = rel_path.clone();
+    let mf = tokio::task::spawn_blocking(move || {
+        media::set_media_sealed(&vault_dir, &rel_path, encrypt, &key)
+    })
+    .await
+    .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))??;
+    let what = if encrypt { "Encrypted" } else { "Decrypted" };
+    record_save_if_active(&format!("{what} media: {path_for_log}"), &git_state);
+    Ok(mf)
+}
+
+/// The pages of `folder` that reference an attachment, so that deleting it
+/// can say what else will lose it.
+#[tauri::command]
+pub async fn media_references(
+    folder: String,
+    md_path: String,
+    state: State<'_, VaultState>,
+) -> Result<media::MediaReferences, PageError> {
+    let vault_dir = get_vault_dir(&state)?;
+    tokio::task::spawn_blocking(move || media::references(&vault_dir, &folder, &md_path))
+        .await
+        .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))?
+}
+
+/// Every attachment in the vault, counted and summed by size on disk.
+#[tauri::command]
+pub async fn media_usage(state: State<'_, VaultState>) -> Result<media::MediaUsage, PageError> {
+    let vault_dir = get_vault_dir(&state)?;
+    tokio::task::spawn_blocking(move || media::usage(&vault_dir))
+        .await
+        .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))?
+}
+
+/// Write the original bytes of an attachment to `dest_path`, owner-only,
+/// refusing a destination inside the vault (git would commit the copy).
+#[tauri::command]
+pub async fn export_media(
+    rel_path: String,
+    dest_path: String,
+    state: State<'_, VaultState>,
+) -> Result<(), PageError> {
+    use std::io::Write;
+    let vault_dir = get_vault_dir(&state)?;
+    super::export::reject_destination_inside_vault(&vault_dir, &dest_path)?;
+    let key = state.master_key();
+    tokio::task::spawn_blocking(move || {
+        let bytes =
+            media::read_media_bytes(&vault_dir, &rel_path, key.as_ref().map(|k| k.as_slice()))?;
+        let mut file = claspt_core::fs_perms::create_owner_only(std::path::Path::new(&dest_path))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        Ok::<(), PageError>(())
+    })
+    .await
+    .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))?
+}
+
+/// Resolve a page-relative `_media/...` reference to an absolute path on disk.
 #[tauri::command]
 pub fn resolve_media_path(
     folder: String,
@@ -543,37 +719,26 @@ pub fn resolve_media_path(
     Ok(abs.to_string_lossy().to_string())
 }
 
-/// Read a media file and return it as a base64 `data:` URL (MIME inferred from extension)
-/// so the frontend can render it inline without filesystem access.
+/// Read a media file and return it as a base64 `data:` URL (MIME inferred
+/// from extension) so the frontend can render it inline without filesystem
+/// access. A sealed file is opened with the master key and reported as such.
 #[tauri::command]
 pub async fn read_media_data_url(
     folder: String,
     md_path: String,
+    include_data: bool,
     state: State<'_, VaultState>,
-) -> Result<String, PageError> {
+) -> Result<media::MediaRead, PageError> {
     let vault_dir = get_vault_dir(&state)?;
+    let key = state.master_key();
     tokio::task::spawn_blocking(move || {
-        let abs = media::resolve_media_path(&vault_dir, &folder, &md_path)?;
-        let data = std::fs::read(&abs).map_err(|e| {
-            PageError::InvalidMedia(format!("failed to read {}: {}", abs.display(), e))
-        })?;
-        let ext = abs
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
-        let mime = match ext.as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "svg" => "image/svg+xml",
-            "pdf" => "application/pdf",
-            _ => "application/octet-stream",
-        };
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-        Ok(format!("data:{};base64,{}", mime, b64))
+        media::read_media(
+            &vault_dir,
+            &folder,
+            &md_path,
+            key.as_ref().map(|k| k.as_slice()),
+            include_data,
+        )
     })
     .await
     .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))?
@@ -596,6 +761,20 @@ pub async fn preview_image_transform(
     .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))?
 }
 
+/// The same preview for bytes the editor already holds (a paste or a drop).
+#[tauri::command]
+pub async fn preview_image_transform_bytes(
+    data: Vec<u8>,
+    extension: String,
+    params: media::ImageTransformParams,
+) -> Result<media::ImageTransformPreview, PageError> {
+    tokio::task::spawn_blocking(move || {
+        media::preview_image_transform_bytes(&data, &extension, &params)
+    })
+    .await
+    .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))?
+}
+
 /// Apply an image transform to the source image and save the result into the folder's
 /// media store, returning the resulting `MediaFile`.
 #[tauri::command]
@@ -603,16 +782,51 @@ pub async fn process_and_save_media(
     folder: String,
     source_path: String,
     params: media::ImageTransformParams,
+    encrypt: bool,
     state: State<'_, VaultState>,
     git_state: State<'_, GitState>,
 ) -> Result<MediaFile, PageError> {
+    validate_source_path(std::path::Path::new(&source_path))?;
     let vault_dir = get_vault_dir(&state)?;
+    let (opts, key) = attachment_options(&state, encrypt)?;
     let mf = tokio::task::spawn_blocking(move || {
         media::process_and_save_media(
             &vault_dir,
             &folder,
             std::path::Path::new(&source_path),
             &params,
+            &opts,
+            key.as_ref().map(|k| k.as_slice()),
+        )
+    })
+    .await
+    .map_err(|e| PageError::Io(std::io::Error::other(e.to_string())))??;
+    record_save_if_active(&format!("Added media: {}", mf.md_path), &git_state);
+    Ok(mf)
+}
+
+/// Transform bytes the editor already holds and save the result.
+#[tauri::command]
+pub async fn process_and_save_media_bytes(
+    folder: String,
+    data: Vec<u8>,
+    extension: String,
+    params: media::ImageTransformParams,
+    encrypt: bool,
+    state: State<'_, VaultState>,
+    git_state: State<'_, GitState>,
+) -> Result<MediaFile, PageError> {
+    let vault_dir = get_vault_dir(&state)?;
+    let (opts, key) = attachment_options(&state, encrypt)?;
+    let mf = tokio::task::spawn_blocking(move || {
+        media::process_and_save_media_bytes(
+            &vault_dir,
+            &folder,
+            &data,
+            &extension,
+            &params,
+            &opts,
+            key.as_ref().map(|k| k.as_slice()),
         )
     })
     .await

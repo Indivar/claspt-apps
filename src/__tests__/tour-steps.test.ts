@@ -40,3 +40,30 @@ describe("tour-steps", () => {
     expect(getNewSteps(CURRENT_TOUR_VERSION).length).toBe(0);
   });
 });
+
+describe("tour steps and the plan", () => {
+  it("leaves Pro-only steps out for a free user", () => {
+    // A tour is a promise that what it points at is there. The sharing step
+    // walked a free user through a feature they cannot use and pointed at a
+    // control they may not have.
+    const free = getAdvancedSteps(false);
+    const pro = getAdvancedSteps(true);
+    expect(free.length).toBeLessThan(pro.length);
+    expect(free.some((s) => s.id === "sharing")).toBe(false);
+    expect(pro.some((s) => s.id === "sharing")).toBe(true);
+  });
+
+  it("keeps every step that needs no licence", () => {
+    const free = getQuickSteps(false);
+    expect(free.length).toBe(getQuickSteps(true).length);
+    expect(free.every((s) => !s.pro)).toBe(true);
+  });
+
+  it("never points a step at a control the plan does not include", () => {
+    // The guard that matters: any step marked pro must be filtered out, not
+    // merely the one we happened to name above.
+    for (const step of [...getQuickSteps(false), ...getAdvancedSteps(false)]) {
+      expect(step.pro, `${step.id} is Pro-only but shown to a free user`).toBeFalsy();
+    }
+  });
+});

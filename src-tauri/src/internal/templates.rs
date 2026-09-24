@@ -46,14 +46,18 @@ pub struct TemplateField {
 }
 
 /// Get all templates.
-pub fn get_templates(vault_dir: &Path) -> Vec<SecretTemplate> {
-    let lib: TemplateLibrary = InternalStore::read(vault_dir, FILENAME);
+pub fn get_templates(vault_dir: &Path, master_key: &[u8]) -> Vec<SecretTemplate> {
+    let lib: TemplateLibrary = InternalStore::read_sealed(vault_dir, FILENAME, master_key);
     lib.templates
 }
 
 /// Save a new template.
-pub fn save_template(vault_dir: &Path, template: &SecretTemplate) -> std::io::Result<()> {
-    let mut lib: TemplateLibrary = InternalStore::read(vault_dir, FILENAME);
+pub fn save_template(
+    vault_dir: &Path,
+    master_key: &[u8],
+    template: &SecretTemplate,
+) -> std::io::Result<()> {
+    let mut lib: TemplateLibrary = InternalStore::read_sealed(vault_dir, FILENAME, master_key);
 
     // Update if exists, otherwise add
     if let Some(existing) = lib.templates.iter_mut().find(|t| t.id == template.id) {
@@ -62,233 +66,29 @@ pub fn save_template(vault_dir: &Path, template: &SecretTemplate) -> std::io::Re
         lib.templates.push(template.clone());
     }
 
-    InternalStore::write(vault_dir, FILENAME, &lib)
+    InternalStore::write_sealed(vault_dir, FILENAME, &lib, master_key)
 }
 
 /// Delete a template by ID.
-pub fn delete_template(vault_dir: &Path, template_id: &str) -> std::io::Result<()> {
-    let mut lib: TemplateLibrary = InternalStore::read(vault_dir, FILENAME);
+pub fn delete_template(
+    vault_dir: &Path,
+    master_key: &[u8],
+    template_id: &str,
+) -> std::io::Result<()> {
+    let mut lib: TemplateLibrary = InternalStore::read_sealed(vault_dir, FILENAME, master_key);
     lib.templates.retain(|t| t.id != template_id);
-    InternalStore::write(vault_dir, FILENAME, &lib)
+    InternalStore::write_sealed(vault_dir, FILENAME, &lib, master_key)
 }
 
 /// Increment the use count for a template.
-pub fn increment_use_count(vault_dir: &Path, template_id: &str) -> std::io::Result<()> {
-    let mut lib: TemplateLibrary = InternalStore::read(vault_dir, FILENAME);
+pub fn increment_use_count(
+    vault_dir: &Path,
+    master_key: &[u8],
+    template_id: &str,
+) -> std::io::Result<()> {
+    let mut lib: TemplateLibrary = InternalStore::read_sealed(vault_dir, FILENAME, master_key);
     if let Some(template) = lib.templates.iter_mut().find(|t| t.id == template_id) {
         template.use_count += 1;
     }
-    InternalStore::write(vault_dir, FILENAME, &lib)
-}
-
-/// Get built-in default templates (not stored, always available).
-pub fn default_templates() -> Vec<SecretTemplate> {
-    vec![
-        SecretTemplate {
-            id: "builtin-login".to_string(),
-            name: "Login".to_string(),
-            icon: "🔑".to_string(),
-            fields: vec![
-                TemplateField {
-                    key: "username".into(),
-                    label: "Username".into(),
-                    field_type: "text".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "password".into(),
-                    label: "Password".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "url".into(),
-                    label: "URL".into(),
-                    field_type: "url".into(),
-                    default_value: None,
-                    required: false,
-                },
-            ],
-            use_count: 0,
-            created_at: String::new(),
-        },
-        SecretTemplate {
-            id: "builtin-api-key".to_string(),
-            name: "API Key".to_string(),
-            icon: "⚡".to_string(),
-            fields: vec![
-                TemplateField {
-                    key: "service".into(),
-                    label: "Service".into(),
-                    field_type: "text".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "key".into(),
-                    label: "API Key".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "secret".into(),
-                    label: "API Secret".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: false,
-                },
-                TemplateField {
-                    key: "url".into(),
-                    label: "Endpoint URL".into(),
-                    field_type: "url".into(),
-                    default_value: None,
-                    required: false,
-                },
-            ],
-            use_count: 0,
-            created_at: String::new(),
-        },
-        SecretTemplate {
-            id: "builtin-server".to_string(),
-            name: "Server".to_string(),
-            icon: "🖥️".to_string(),
-            fields: vec![
-                TemplateField {
-                    key: "hostname".into(),
-                    label: "Hostname".into(),
-                    field_type: "text".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "port".into(),
-                    label: "Port".into(),
-                    field_type: "number".into(),
-                    default_value: Some("22".into()),
-                    required: false,
-                },
-                TemplateField {
-                    key: "username".into(),
-                    label: "Username".into(),
-                    field_type: "text".into(),
-                    default_value: Some("root".into()),
-                    required: true,
-                },
-                TemplateField {
-                    key: "password".into(),
-                    label: "Password".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: false,
-                },
-                TemplateField {
-                    key: "ssh_key".into(),
-                    label: "SSH Key".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: false,
-                },
-            ],
-            use_count: 0,
-            created_at: String::new(),
-        },
-        SecretTemplate {
-            id: "builtin-database".to_string(),
-            name: "Database".to_string(),
-            icon: "🗄️".to_string(),
-            fields: vec![
-                TemplateField {
-                    key: "host".into(),
-                    label: "Host".into(),
-                    field_type: "text".into(),
-                    default_value: Some("localhost".into()),
-                    required: true,
-                },
-                TemplateField {
-                    key: "port".into(),
-                    label: "Port".into(),
-                    field_type: "number".into(),
-                    default_value: Some("5432".into()),
-                    required: false,
-                },
-                TemplateField {
-                    key: "database".into(),
-                    label: "Database".into(),
-                    field_type: "text".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "username".into(),
-                    label: "Username".into(),
-                    field_type: "text".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "password".into(),
-                    label: "Password".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "connection_string".into(),
-                    label: "Connection String".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: false,
-                },
-            ],
-            use_count: 0,
-            created_at: String::new(),
-        },
-        SecretTemplate {
-            id: "builtin-credit-card".to_string(),
-            name: "Credit Card".to_string(),
-            icon: "💳".to_string(),
-            fields: vec![
-                TemplateField {
-                    key: "card_name".into(),
-                    label: "Cardholder Name".into(),
-                    field_type: "text".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "card_number".into(),
-                    label: "Card Number".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "expiry".into(),
-                    label: "Expiry (MM/YY)".into(),
-                    field_type: "text".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "cvv".into(),
-                    label: "CVV".into(),
-                    field_type: "password".into(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateField {
-                    key: "billing_zip".into(),
-                    label: "Billing ZIP".into(),
-                    field_type: "text".into(),
-                    default_value: None,
-                    required: false,
-                },
-            ],
-            use_count: 0,
-            created_at: String::new(),
-        },
-    ]
+    InternalStore::write_sealed(vault_dir, FILENAME, &lib, master_key)
 }

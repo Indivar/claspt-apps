@@ -33,6 +33,7 @@ pub mod internal;
 #[cfg(feature = "pro")]
 pub mod license;
 pub mod pages;
+pub mod passkeys;
 pub mod search;
 #[cfg(feature = "pro")]
 pub mod share;

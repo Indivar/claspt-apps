@@ -8,7 +8,7 @@
  * breach check. Each panel runs its own Tauri command on demand and tracks its
  * own idle/loading/done/error state.
  */
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { errorMessage } from "@/lib/error-message";
 import * as cmd from "@/lib/commands";
 import { usePagesStore } from "@/stores/pages-store";
@@ -20,7 +20,10 @@ import type {
   DuplicateReport,
   BreachCheckReport,
   TagUsage,
+  TrashEntry,
 } from "@/lib/commands";
+import { formatTimeAgo } from "@claspt/shared/format-time";
+import { toast } from "sonner";
 
 type UtilityState<T> =
   | { status: "idle" }
@@ -30,12 +33,7 @@ type UtilityState<T> =
 
 /** Identifies which utility panel is currently shown. */
 export type UtilityId =
-  | "stats"
-  | "health"
-  | "duplicates"
-  | "consolidate"
-  | "tags"
-  | "breach";
+  "stats" | "health" | "duplicates" | "consolidate" | "tags" | "breach" | "trash";
 
 /** Human-readable byte size (B / KB / MB). */
 function formatBytes(bytes: number): string {
@@ -574,6 +572,161 @@ function BreachPanel({
 // ── Main Component ──
 
 /** Owns per-utility run state and renders the panel matching `activeUtility`. */
+/**
+ * The vault's trash: every deleted page, newest first, with Restore and
+ * Delete now for each and Empty trash for all. Entries older than the
+ * retention set under Settings › Editor go when the vault is unlocked.
+ */
+function TrashPanel() {
+  const [entries, setEntries] = useState<TrashEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
+  // Bumped after every change so the list is read again from the vault.
+  const [version, setVersion] = useState(0);
+  const restoreFromTrash = usePagesStore((s) => s.restoreFromTrash);
+
+  const reload = useCallback(() => setVersion((v) => v + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    cmd
+      .trashList()
+      .then((list) => {
+        if (cancelled) return;
+        setEntries(list);
+        setError(null);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(errorMessage(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [version]);
+
+  const restore = async (entry: TrashEntry) => {
+    setBusy(entry.id);
+    const ok = await restoreFromTrash(entry.id);
+    setBusy(null);
+    if (ok) reload();
+  };
+
+  const purge = async (entry: TrashEntry) => {
+    setBusy(entry.id);
+    try {
+      await cmd.trashPurge(entry.id);
+      toast.success(`"${entry.title}" removed from the trash`);
+    } catch (e) {
+      toast.error(errorMessage(e));
+    }
+    setBusy(null);
+    reload();
+  };
+
+  const empty = async () => {
+    setBusy("all");
+    try {
+      const n = await cmd.trashEmpty();
+      toast.success(`${n} ${n === 1 ? "page" : "pages"} removed from the trash`);
+    } catch (e) {
+      toast.error(errorMessage(e));
+    }
+    setBusy(null);
+    setConfirmEmpty(false);
+    reload();
+  };
+
+  return (
+    <div>
+      <p className="mb-3 text-[13px] leading-relaxed text-text-secondary">
+        Deleted pages wait here and can be put back where they were. Each entry is removed
+        for good after the retention set under Settings › Editor, or when you delete it
+        here. The version history still holds every page that ever existed.
+      </p>
+      {error && <ErrorMsg error={error} />}
+      {entries === null ? (
+        <p className="text-[12px] text-text-muted">Loading…</p>
+      ) : entries.length === 0 ? (
+        <p className="rounded-lg border border-border/60 bg-surface-raised px-3 py-3 text-[12px] text-text-muted">
+          The trash is empty.
+        </p>
+      ) : (
+        <>
+          <ul className="divide-y divide-border/40 rounded-lg border border-border/60 bg-surface-raised">
+            {entries.map((entry) => (
+              <li key={entry.id} className="flex items-center gap-3 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <div
+                    className="truncate text-[13px] font-medium text-text-primary"
+                    title={entry.original_path}
+                  >
+                    {entry.title || entry.original_path}
+                    {entry.encrypted && (
+                      <span className="ml-1.5 text-[10px] text-text-muted">
+                        encrypted
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-text-muted">
+                    {entry.folder || "general"} · deleted{" "}
+                    {formatTimeAgo(entry.deleted_at)} · goes{" "}
+                    {new Date(entry.purge_at).toLocaleDateString()}
+                  </div>
+                </div>
+                <button
+                  onClick={() => void restore(entry)}
+                  disabled={busy !== null}
+                  className="rounded-lg border border-border/60 px-2.5 py-1 text-[12px] text-text-primary transition-all hover:border-text-muted disabled:opacity-50"
+                >
+                  Restore
+                </button>
+                <button
+                  onClick={() => void purge(entry)}
+                  disabled={busy !== null}
+                  className="rounded-lg px-2.5 py-1 text-[12px] text-danger transition-all hover:bg-danger/10 disabled:opacity-50"
+                >
+                  Delete now
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-3 flex items-center gap-2">
+            {confirmEmpty ? (
+              <>
+                <span className="text-[12px] text-text-secondary">
+                  Remove all {entries.length} for good?
+                </span>
+                <button
+                  onClick={() => void empty()}
+                  disabled={busy !== null}
+                  className="rounded-lg bg-danger px-3 py-1 text-[12px] font-medium text-white disabled:opacity-50"
+                >
+                  Empty trash
+                </button>
+                <button
+                  onClick={() => setConfirmEmpty(false)}
+                  className="rounded-lg px-3 py-1 text-[12px] text-text-secondary hover:bg-surface-overlay"
+                >
+                  Keep
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => setConfirmEmpty(true)}
+                disabled={busy !== null}
+                className="rounded-lg border border-border/60 px-3 py-1 text-[12px] text-text-secondary transition-all hover:border-text-muted disabled:opacity-50"
+              >
+                Empty trash…
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function UtilitiesTab({ activeUtility }: { activeUtility: UtilityId }) {
   const { loadPages } = usePagesStore();
   const [stats, setStats] = useState<UtilityState<VaultStats>>({ status: "idle" });
@@ -696,6 +849,7 @@ export function UtilitiesTab({ activeUtility }: { activeUtility: UtilityId }) {
         />
       )}
       {activeUtility === "breach" && <BreachPanel state={breach} onRun={runBreach} />}
+      {activeUtility === "trash" && <TrashPanel />}
       {consolidateOpen && <ConsolidateDialog onClose={() => setConsolidateOpen(false)} />}
     </>
   );

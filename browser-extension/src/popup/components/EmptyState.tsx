@@ -2,11 +2,12 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 import React from "react";
-import { LockIcon, SearchIcon, XIcon } from "./icons";
+import { LockIcon, SearchIcon } from "./icons";
 import { TroubleshootingPanel } from "./TroubleshootingPanel";
 
 interface EmptyStateProps {
-  variant: "no-credentials" | "no-results" | "disconnected" | "vault-locked";
+  variant:
+    "no-credentials" | "no-results" | "disconnected" | "vault-locked" | "unauthorized";
   domain?: string;
   query?: string;
   onAction?: () => void;
@@ -51,7 +52,8 @@ export function EmptyState({ variant, domain, query, onAction }: EmptyStateProps
             Open the Claspt desktop app and enable the Local API to auto-fill credentials.
           </p>
           <p className="mt-2 max-w-[260px] text-[11px] leading-relaxed text-text-muted">
-            The <strong className="text-accent">Generator</strong> tab works without a connection — switch to it to create passwords.
+            The <strong className="text-accent">Generator</strong> tab works without a
+            connection — switch to it to create passwords.
           </p>
           {onAction && (
             <button
@@ -67,14 +69,31 @@ export function EmptyState({ variant, domain, query, onAction }: EmptyStateProps
         </>
       )}
 
+      {variant === "unauthorized" && (
+        <>
+          <LockIcon size={32} className="text-text-dim" />
+          <p className="mt-3 text-sm font-medium text-text-primary">
+            Pair this extension again
+          </p>
+          <p className="mt-1 max-w-[260px] text-xs leading-relaxed text-text-muted">
+            Claspt is running, but it does not know this extension's key. In the app, open
+            Settings › Integrations and press{" "}
+            <strong className="text-accent">Pair another browser</strong>, then open this
+            popup within two minutes.
+          </p>
+          <p className="mt-2 max-w-[260px] text-[11px] leading-relaxed text-text-muted">
+            This happens after the key was revoked in the app, or after the extension was
+            reinstalled.
+          </p>
+        </>
+      )}
+
       {variant === "vault-locked" && (
         <>
           <span style={{ color: "var(--color-warning)" }}>
             <LockIcon size={32} />
           </span>
-          <p className="mt-3 text-sm font-medium text-text-primary">
-            Vault is locked
-          </p>
+          <p className="mt-3 text-sm font-medium text-text-primary">Vault is locked</p>
           <p className="mt-1 max-w-[260px] text-xs leading-relaxed text-text-muted">
             Unlock Claspt to access your credentials.
           </p>

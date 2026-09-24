@@ -21,4 +21,9 @@ pub mod config;
 pub mod error;
 pub mod help_pages;
 pub mod init;
+pub mod last_opened;
+pub mod recovery_sheet;
 pub mod token_store;
+
+#[cfg(test)]
+mod old_vault_tests;

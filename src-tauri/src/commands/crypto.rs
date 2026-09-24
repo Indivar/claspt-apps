@@ -27,7 +27,7 @@ use crate::crypto::vault_key;
 use crate::inbox::{self, InboxState};
 use crate::local_api::{self, ApprovalManager, LocalApiState};
 use crate::vault::auth::{self, BruteForceGuard};
-use crate::vault::config::VaultConfig;
+use crate::vault::config::{MasterKeyVerifyChange, VaultConfig};
 use crate::vault::error::VaultError;
 use crate::vault::init::{self, VaultCreationResult};
 
@@ -55,10 +55,31 @@ pub struct VaultState {
     pub brute_force: BruteForceGuard,
     /// Backend UI-lock: last IPC activity timestamp (epoch seconds).
     pub last_activity: Arc<Mutex<u64>>,
+    /// Last request the local API served for an authenticated client (epoch
+    /// seconds). Holds the key lock back, never the screen lock.
+    pub last_api_activity: Arc<Mutex<u64>>,
     /// Flag to stop the UI-lock watchdog thread.
     pub watchdog_active: Arc<AtomicBool>,
     /// Flag to stop the key-lock watchdog thread.
     pub key_lock_active: Arc<AtomicBool>,
+}
+
+fn epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Whether the key lock is due: neither the UI nor the local API has been
+/// used for `timeout_secs`. A zero timestamp means "never recorded"; the
+/// unlock itself records UI activity, so a vault nobody touches afterwards
+/// counts from the unlock. The screen lock deliberately looks at the UI
+/// alone: a person walking away is what it is for, while a tool at work
+/// behind the locked screen is exactly what the key lock must not cut off.
+fn key_lock_due(last_ui: u64, last_api: u64, now: u64, timeout_secs: u64) -> bool {
+    let last = last_ui.max(last_api);
+    last > 0 && now.saturating_sub(last) >= timeout_secs
 }
 
 impl VaultState {
@@ -69,6 +90,7 @@ impl VaultState {
             vault_path: Mutex::new(None),
             brute_force: BruteForceGuard::new(),
             last_activity: Arc::new(Mutex::new(0)),
+            last_api_activity: Arc::new(Mutex::new(0)),
             watchdog_active: Arc::new(AtomicBool::new(false)),
             key_lock_active: Arc::new(AtomicBool::new(false)),
         }
@@ -77,10 +99,16 @@ impl VaultState {
     /// Record IPC activity to reset the backend auto-lock timer.
     pub fn touch_activity(&self) {
         if let Ok(mut ts) = self.last_activity.lock() {
-            *ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            *ts = epoch_seconds();
+        }
+    }
+
+    /// Record a request the local API served for an authenticated client,
+    /// so the key lock counts a browser extension or an AI tool at work as
+    /// activity. See `key_lock_due` for why the screen lock does not.
+    pub fn touch_api_activity(&self) {
+        if let Ok(mut ts) = self.last_api_activity.lock() {
+            *ts = epoch_seconds();
         }
     }
 
@@ -136,8 +164,13 @@ pub fn key_fingerprint(key: &[u8]) -> String {
 
 impl Drop for VaultState {
     fn drop(&mut self) {
-        // Dropping the Zeroizing<Vec<u8>> wrapper auto-zeroes the key
+        // Dropping the Zeroizing<Vec<u8>> wrapper auto-zeroes the key. The
+        // group key is password-equivalent for every synced bundle and was
+        // left behind here, and on every other lock path, until now.
         if let Ok(mut key) = self.master_key.lock() {
+            *key = None;
+        }
+        if let Ok(mut key) = self.group_key.lock() {
             *key = None;
         }
     }
@@ -148,6 +181,166 @@ fn get_master_key(state: &State<VaultState>) -> Result<Zeroizing<Vec<u8>>, Crypt
     state
         .master_key()
         .ok_or_else(|| CryptoError::Encryption("vault is locked".into()))
+}
+
+/// Today's date, written the way a person reads it on a printed sheet.
+fn today() -> String {
+    chrono::Local::now().format("%-d %B %Y").to_string()
+}
+
+/// The filename to offer in the save dialog for this vault's recovery key.
+#[tauri::command]
+pub fn recovery_key_filename(vault_dir: String) -> String {
+    let vault_path = expand_tilde(&vault_dir);
+    crate::vault::recovery_sheet::suggested_filename(&vault_path, &today())
+}
+
+/// Write the recovery key to `file_path` as a self-describing sheet.
+///
+/// Records where it went in the vault config — the path, never the key — so
+/// Settings can tell the user a year later where they put it. Refuses a
+/// location inside the vault; see
+/// [`crate::vault::recovery_sheet::RecoverySheetError::InsideVault`].
+#[tauri::command]
+pub fn save_recovery_key(
+    recovery_key: String,
+    file_path: String,
+    vault_dir: String,
+) -> Result<String, VaultError> {
+    let vault_path = expand_tilde(&vault_dir);
+    let target = expand_tilde(&file_path);
+    let saved_on = today();
+
+    crate::vault::recovery_sheet::write(
+        &recovery_key,
+        &target,
+        &vault_path,
+        env!("APP_VERSION"),
+        &saved_on,
+    )?;
+
+    // Best effort: the key is on disk either way, and failing the whole call
+    // because a note about it could not be written would be worse than the
+    // missing note.
+    if let Ok(mut config) = init::read_config(&vault_path) {
+        config.recovery_key_saved_path = Some(target.display().to_string());
+        config.recovery_key_saved_at = Some(saved_on);
+        if let Err(e) = init::write_config(&vault_path, &config) {
+            log::warn!("Recovery key saved, but its location could not be recorded: {e}");
+        }
+    }
+
+    Ok(target.display().to_string())
+}
+
+/// Open the OS print dialog for the current window.
+///
+/// Printing is driven from Rust because `@tauri-apps/api` 2.10 exposes no
+/// `print()` binding, and `window.print()` is a no-op in WKWebView. The whole
+/// webview is what gets printed, so the page it prints is shaped by the
+/// `@media print` rules in `index.css` rather than by this command.
+#[tauri::command]
+pub fn print_window(window: tauri::WebviewWindow) -> Result<(), VaultError> {
+    window
+        .print()
+        .map_err(|e| VaultError::InvalidConfig(format!("could not open the print dialog: {e}")))
+}
+
+/// Change the master password on an unlocked vault.
+///
+/// Re-wraps the same master key under a new password, so every secret already
+/// written stays readable and the recovery key keeps working — it is that same
+/// master key, and it does not change here.
+///
+/// Two things do change, and both are handled rather than left to drift:
+///
+/// The sync group key is `kdf(password, vault_id)`, so a new password produces
+/// a new group key. It is recomputed into the live state here. The caller is
+/// responsible for warning about the consequence on other devices, which is
+/// that they keep deriving the old one until their password is changed too.
+///
+/// Biometric unlock stores both keys in the keychain. The master key is
+/// unchanged, but the stored group key would be stale, and a biometric unlock
+/// would then restore a group key that no longer matches the password — the
+/// exact split-key bug the paired storage was introduced to stop. Both entries
+/// are rewritten while we hold the new values.
+#[tauri::command]
+pub async fn change_master_password(
+    old_password: String,
+    new_password: String,
+    state: State<'_, VaultState>,
+    sync_v2: State<'_, super::sync::SyncV2Managed>,
+) -> Result<(), VaultError> {
+    auth::validate_password(&new_password)?;
+
+    // Shares the brute-force guard with unlock: this verifies the old password,
+    // so it is another place a guess can be tested.
+    let _attempt = state.brute_force.begin_attempt()?;
+
+    let vault_path = state
+        .vault_path
+        .lock()
+        .map_err(|_| VaultError::LockPoisoned)?
+        .clone()
+        .ok_or_else(|| VaultError::NotFound("no vault open".into()))?;
+
+    let old_password = Zeroizing::new(old_password.into_bytes());
+    let new_password = Zeroizing::new(new_password.into_bytes());
+
+    // Argon2id twice over, intentionally slow, so off the UI thread.
+    let vault_key_path = vault_path.join(".securenotes").join("vault.key");
+    let new_for_task = new_password.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        vault_key::change_password(&old_password, &new_for_task, &vault_key_path)
+    })
+    .await
+    .map_err(|_| VaultError::LockPoisoned)?;
+
+    if let Err(e) = result {
+        // A wrong old password lands here and counts against the guard; the
+        // comment said so for a long time while the call was missing, which
+        // left this command an unthrottled oracle for the current password.
+        state.brute_force.record_failure();
+        return Err(e.into());
+    }
+    state.brute_force.record_success();
+
+    // The group key follows the password, so recompute it for this session and
+    // for anything that reads it from the keychain later.
+    let config = init::read_config(&vault_path).ok();
+    let vault_id = config
+        .as_ref()
+        .and_then(|c| c.vault_id.as_deref())
+        .unwrap_or_default();
+    let gk = derive_group_key(&new_password, vault_id);
+
+    if let Some(ref cfg) = config {
+        if cfg.biometric_mode != "disabled" {
+            if let Some(mk) = state.master_key() {
+                if let Err(e) = crate::biometric::keystore::store_master_key(vault_id, &mk) {
+                    log::warn!("Password changed but keychain master_key not refreshed: {e}");
+                }
+            }
+            if let Err(e) = crate::biometric::keystore::store_group_key(vault_id, &gk) {
+                log::warn!("Password changed but keychain group_key not refreshed: {e}");
+            }
+        }
+    }
+
+    *state
+        .group_key
+        .lock()
+        .map_err(|_| VaultError::LockPoisoned)? = Some(gk);
+
+    // The remote chain is under the old group key from here on unless a fresh
+    // snapshot goes up under the new one; see `rekey_after_password_change`.
+    // The password is changed either way, and the error says so.
+    if let Err(e) = super::sync::rekey_after_password_change(&sync_v2, &state).await {
+        log::error!("password changed but the sync chain could not be re-keyed: {e}");
+        return Err(VaultError::SyncRekeyFailed(e.to_string()));
+    }
+
+    Ok(())
 }
 
 /// Create a new vault: validate password, init directory structure, return recovery key.
@@ -173,8 +366,7 @@ pub fn create_vault(
 
     let gk = derive_group_key(&password, &vault_id);
     log::debug!(
-        "[crypto] create_vault: vault_id={} group_key_fingerprint={}",
-        vault_id,
+        "[crypto] create_vault: group_key_fingerprint={}",
         key_fingerprint(&gk)
     );
 
@@ -223,7 +415,7 @@ pub fn unlock_vault(
     state.brute_force.load_from_disk(&vault_path);
 
     // Atomically check brute force delay and stamp the attempt
-    state.brute_force.begin_attempt()?;
+    let _attempt = state.brute_force.begin_attempt()?;
 
     let password = Zeroizing::new(password.into_bytes());
 
@@ -235,11 +427,24 @@ pub fn unlock_vault(
             // Read config once and reuse for both biometric refresh and sync init (LOW-1)
             let mut config = init::read_config(&vault_path).ok();
 
-            // Ensure vault_id exists
+            // Ensure vault_id exists, and record the hash of the key that has
+            // just opened the vault. That hash is the only way to prove a
+            // keychain entry belongs to this vault: without it a pre-3.3.34
+            // biometric enrolment cannot be adopted, and with a hash from
+            // another key the real enrolment is rejected and biometrics
+            // switched off. A password unlock is the one moment the real
+            // master key is in hand, so it is where both are put right.
             if let Some(ref mut cfg) = config {
                 let had_vault_id = cfg.vault_id.is_some();
                 cfg.ensure_vault_id();
-                if !had_vault_id {
+                let verify_change = cfg
+                    .record_master_key_verify(&vault_key::compute_master_key_verify(&master_key));
+                if verify_change == MasterKeyVerifyChange::Repaired {
+                    log::warn!(
+                        "config.json held a master_key_verify from another key; replaced it with the hash of the key that opened this vault. If sync or biometrics were set up while it was wrong, the vault id may be wrong too"
+                    );
+                }
+                if !had_vault_id || verify_change != MasterKeyVerifyChange::Unchanged {
                     let _ = init::write_config(&vault_path, cfg);
                 }
             }
@@ -251,8 +456,7 @@ pub fn unlock_vault(
 
             let gk = derive_group_key(&password, vault_id);
             log::debug!(
-                "[crypto] unlock_vault: vault_id={} group_key_fingerprint={}",
-                vault_id,
+                "[crypto] unlock_vault: group_key_fingerprint={}",
                 key_fingerprint(&gk)
             );
 
@@ -264,11 +468,19 @@ pub fn unlock_vault(
             // from password + vault_id. Storing both keeps biometric and
             // password unlock state identical.
             if let Some(ref cfg) = config {
-                if cfg.biometric_mode != "disabled" {
-                    if let Err(e) = crate::biometric::keystore::store_master_key(&master_key) {
+                let enrolled =
+                    crate::biometric::keystore::has_stored_key(vault_id).unwrap_or(false);
+                if keychain_refresh_wanted(
+                    &cfg.biometric_mode,
+                    crate::biometric::prompt::is_available(),
+                    enrolled,
+                ) {
+                    if let Err(e) =
+                        crate::biometric::keystore::store_master_key(vault_id, &master_key)
+                    {
                         log::warn!("Failed to refresh keychain master_key: {e}");
                     }
-                    if let Err(e) = crate::biometric::keystore::store_group_key(&gk) {
+                    if let Err(e) = crate::biometric::keystore::store_group_key(vault_id, &gk) {
                         log::warn!("Failed to refresh keychain group_key: {e}");
                     }
                 }
@@ -318,6 +530,15 @@ pub fn unlock_vault(
 
             // Trigger background license online check (non-blocking)
             crate::license::validator::maybe_online_check(&vault_path);
+
+            // Remember this vault so the next launch reads its settings
+            // rather than the default directory's.
+            {
+                use tauri::Manager;
+                if let Ok(config_dir) = app.path().app_config_dir() {
+                    crate::vault::last_opened::remember(&config_dir, &vault_path);
+                }
+            }
 
             // Auto-start the local API and the SSH agent if enabled. Clients
             // live in the registry, so "enabled" is the only condition.
@@ -428,8 +649,10 @@ pub fn unlock_vault(
             if key_lock_mins > 0 {
                 state.key_lock_active.store(true, Ordering::Relaxed);
                 let activity = Arc::clone(&state.last_activity);
+                let api_activity = Arc::clone(&state.last_api_activity);
                 let active = Arc::clone(&state.key_lock_active);
                 let master_key_ref = Arc::clone(&state.master_key);
+                let group_key_ref = Arc::clone(&state.group_key);
                 let app_handle = app.clone();
                 let timeout = Duration::from_secs(u64::from(key_lock_mins) * 60);
                 std::thread::spawn(move || {
@@ -438,20 +661,23 @@ pub fn unlock_vault(
                         if !active.load(Ordering::Relaxed) {
                             break;
                         }
-                        let last = match activity.lock() {
+                        let last_ui = match activity.lock() {
                             Ok(guard) => *guard,
                             Err(_) => break,
                         };
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        if last > 0 && now.saturating_sub(last) >= timeout.as_secs() {
+                        let last_api = match api_activity.lock() {
+                            Ok(guard) => *guard,
+                            Err(_) => break,
+                        };
+                        if key_lock_due(last_ui, last_api, epoch_seconds(), timeout.as_secs()) {
                             log::info!(
-                                "Key lock: zeroing master key after {key_lock_mins}m of inactivity"
+                                "Key lock: zeroing master key after {key_lock_mins}m without UI or API activity"
                             );
-                            // Zero the master key directly
+                            // Zero both keys directly
                             if let Ok(mut key) = master_key_ref.lock() {
+                                *key = None;
+                            }
+                            if let Ok(mut key) = group_key_ref.lock() {
                                 *key = None;
                             }
                             let _ = app_handle.emit("vault-key-locked", ());
@@ -517,6 +743,24 @@ pub fn unlock_vault(
                             log::info!("Rotation reminders: {added} raised, {resolved} resolved")
                         }
                         Err(e) => log::warn!("Rotation reminder check failed: {e}"),
+                    }
+                });
+            }
+
+            // The trash: whatever has waited longer than the retention goes
+            // now, off the UI thread. Git still has every purged page.
+            {
+                let vault_for_trash = vault_path.clone();
+                std::thread::spawn(move || {
+                    let days = crate::pages::trash::retention_for(&vault_for_trash);
+                    match crate::pages::trash::purge_expired(
+                        &vault_for_trash,
+                        days,
+                        chrono::Utc::now(),
+                    ) {
+                        Ok(0) => {}
+                        Ok(n) => log::info!("Trash: {n} page(s) older than {days} days purged"),
+                        Err(e) => log::warn!("Trash purge failed: {e}"),
                     }
                 });
             }
@@ -602,9 +846,14 @@ pub fn key_lock_vault(
     // Close search engine
     close_search_engine(&search_state);
 
-    // Zero the master key — secrets become inaccessible
+    // Zero both keys — secrets become inaccessible, and the sync group key
+    // does not outlive the master key it was derived beside.
     *state
         .master_key
+        .lock()
+        .map_err(|_| VaultError::LockPoisoned)? = None;
+    *state
+        .group_key
         .lock()
         .map_err(|_| VaultError::LockPoisoned)? = None;
 
@@ -640,12 +889,13 @@ pub fn get_vault_config(state: State<VaultState>) -> Result<VaultConfig, VaultEr
     init::read_config(vault_path)
 }
 
-/// Update vault config.
+/// Save the settings the frontend sends. It sends the whole config from a
+/// copy it loaded earlier, so the fields the app writes on its own (vault
+/// id, key hash, tokens, licence, biometric mode, ...) are taken from the
+/// copy on disk, never from the request: a stale or foreign copy must not be
+/// able to change what vault this is.
 #[tauri::command]
 pub fn set_vault_config(config: VaultConfig, state: State<VaultState>) -> Result<(), VaultError> {
-    // Validate config values before persisting
-    config.validate()?;
-
     let vault_path = state
         .vault_path
         .lock()
@@ -653,7 +903,9 @@ pub fn set_vault_config(config: VaultConfig, state: State<VaultState>) -> Result
     let vault_path = vault_path
         .as_ref()
         .ok_or_else(|| VaultError::NotFound("no vault open".into()))?;
-    init::write_config(vault_path, &config)
+    let merged = init::read_config(vault_path)?.with_settings_from(config);
+    merged.validate()?;
+    init::write_config(vault_path, &merged)
 }
 
 /// Verify the vault password without re-unlocking.
@@ -666,7 +918,7 @@ pub async fn verify_password(
     password: String,
     state: State<'_, VaultState>,
 ) -> Result<(), VaultError> {
-    state.brute_force.begin_attempt()?;
+    let _attempt = state.brute_force.begin_attempt()?;
 
     let password = Zeroizing::new(password.into_bytes());
 
@@ -710,7 +962,7 @@ pub fn recover_with_key(
     sync_state: State<SyncState>,
 ) -> Result<VaultCreationResult, VaultError> {
     // Brute force protection applies to recovery attempts too
-    state.brute_force.begin_attempt()?;
+    let _attempt = state.brute_force.begin_attempt()?;
 
     // Validate new password
     auth::validate_password(&new_password)?;
@@ -728,6 +980,17 @@ pub fn recover_with_key(
         .unwrap_or_default();
 
     let vault_key_path = vault_path.join(".securenotes").join("vault.key");
+
+    // A legacy vault has no verify hash, so the core accepts any 32-byte key
+    // and rewrites vault.key around it. A mistyped key then "recovered" the
+    // vault, the next unlock recorded a hash of the wrong key, and the real
+    // recovery sheet was refused for good. Before the core is allowed to
+    // write anything, the key is proven against a sealed value on disk.
+    if verify_hash.is_none() {
+        let candidate = decode_recovery_key(&recovery_key)?;
+        prove_recovery_key(&vault_path, &candidate)?;
+    }
+
     match vault_key::recover_with_key(
         &recovery_key,
         &new_password,
@@ -736,6 +999,17 @@ pub fn recover_with_key(
     ) {
         Ok(master_key) => {
             state.brute_force.record_success();
+
+            // Record the proven key's hash now, so the vault leaves its
+            // legacy state here rather than at some later unlock.
+            if let Ok(mut cfg) = init::read_config(&vault_path) {
+                if cfg.master_key_verify.is_none() {
+                    cfg.master_key_verify = Some(vault_key::compute_master_key_verify(&master_key));
+                    if let Err(e) = init::write_config(&vault_path, &cfg) {
+                        log::warn!("recovery: could not record master_key_verify: {e}");
+                    }
+                }
+            }
 
             // Store the recovery key (base64 of master key) for display
             let new_recovery_key = base64::engine::general_purpose::STANDARD.encode(&*master_key);
@@ -860,6 +1134,72 @@ pub fn decrypt_block(encoded: String, state: State<VaultState>) -> Result<String
 }
 
 /// Returns the inner logic for default vault dir suggestion (testable without Tauri state).
+/// The raw master key a recovery string encodes, or an error for a string
+/// that is not one.
+fn decode_recovery_key(recovery_key: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(recovery_key.trim())
+        .map_err(|_| {
+            VaultError::Crypto(CryptoError::InvalidVaultKey(
+                "recovery key is not valid base64".into(),
+            ))
+        })?;
+    if bytes.len() != 32 {
+        return Err(VaultError::Crypto(CryptoError::InvalidVaultKey(
+            "recovery key must decode to 32 bytes".into(),
+        )));
+    }
+    Ok(Zeroizing::new(bytes))
+}
+
+/// Prove `key` is this vault's master key by opening one sealed value.
+///
+/// The page-level decrypt deliberately leaves a value it cannot open in
+/// place, so it cannot serve as a proof; the AEAD is asked directly. A vault
+/// with no sealed value yet has nothing to lose to a wrong key and nothing
+/// to prove against, and is accepted.
+fn prove_recovery_key(vault_dir: &std::path::Path, key: &[u8]) -> Result<(), VaultError> {
+    use base64::Engine;
+    let mut sample: Option<Vec<u8>> = None;
+    let _ = crate::pages::crud::walk_vault_pages(vault_dir, |_, _, content| {
+        if sample.is_some() {
+            return;
+        }
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(encoded) = trimmed.strip_prefix("enc:v1:") {
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) {
+                    sample = Some(bytes);
+                    return;
+                }
+            }
+        }
+    });
+    match sample {
+        None => Ok(()),
+        Some(bytes) => claspt_core::crypto::aead::decrypt(key, &bytes)
+            .map(|_| ())
+            .map_err(|_| {
+                VaultError::Crypto(CryptoError::InvalidVaultKey(
+                    "recovery key does not open this vault's secrets".into(),
+                ))
+            }),
+    }
+}
+
+/// Whether a password unlock should rewrite the keychain copy of the keys.
+///
+/// Only an existing enrolment is refreshed, and only where a biometric
+/// prompt exists to guard it. Enrolment itself happens in `biometric_enroll`,
+/// which proves the biometric first. A config string alone used to be enough
+/// here, so anything that could set `biometric_mode`, including on Linux
+/// where no prompt exists, turned a key held in memory into one that sat in
+/// the keyring across reboots with nothing asked.
+fn keychain_refresh_wanted(mode: &str, prompt_available: bool, enrolled: bool) -> bool {
+    mode != "disabled" && prompt_available && enrolled
+}
+
 fn suggest_default_vault_dir_inner() -> String {
     // On macOS and Windows, use Documents/Claspt.
     // On Linux, use ~/Claspt (~/Documents may not exist).
@@ -885,6 +1225,15 @@ fn suggest_default_vault_dir_inner() -> String {
 /// A path that cannot be read counts as "no vault": the caller uses this to
 /// choose which form to show, and offering to create is recoverable, whereas
 /// asking someone to unlock something that is not there is a dead end.
+/// What is already at `path`, so the create form can warn before it writes.
+#[tauri::command]
+pub fn inspect_vault_dir(path: String) -> init::VaultDirState {
+    if path.trim().is_empty() {
+        return init::VaultDirState::Empty;
+    }
+    init::inspect_vault_dir(&expand_tilde(&path))
+}
+
 #[tauri::command]
 pub fn vault_exists_at(path: String) -> bool {
     if path.trim().is_empty() {
@@ -902,6 +1251,77 @@ pub fn suggest_default_vault_dir() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEN_MINUTES: u64 = 600;
+
+    #[test]
+    fn the_key_lock_waits_while_a_tool_is_using_the_api() {
+        // The screen went idle long ago, the API was used a moment ago.
+        assert!(!key_lock_due(1_000, 1_900, 2_000, TEN_MINUTES));
+    }
+
+    #[test]
+    fn the_key_lock_fires_when_both_the_screen_and_the_api_are_idle() {
+        assert!(key_lock_due(1_000, 1_200, 2_000, TEN_MINUTES));
+        // The API alone, idle for the whole timeout.
+        assert!(key_lock_due(0, 1_000, 1_600, TEN_MINUTES));
+    }
+
+    #[test]
+    fn the_key_lock_waits_until_some_activity_has_been_recorded() {
+        assert!(!key_lock_due(0, 0, 2_000, TEN_MINUTES));
+    }
+
+    #[test]
+    fn a_legacy_vault_only_accepts_a_recovery_key_that_opens_a_secret() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        std::fs::create_dir_all(vault.join("general")).unwrap();
+        let right = [0x21u8; 32];
+        let wrong = [0x22u8; 32];
+
+        // An empty vault has nothing to prove against.
+        prove_recovery_key(vault, &wrong).expect("empty vault accepts any key");
+
+        // One sealed value under the right key.
+        let sealed = claspt_core::crypto::aead::encrypt(&right, b"hunter2").unwrap();
+        let line = format!(
+            ":::secret[DB]\nenc:v1:{}\n:::\n",
+            base64::engine::general_purpose::STANDARD.encode(&sealed)
+        );
+        crate::pages::crud::create_page(vault, "Prod", "general", &line, false).unwrap();
+
+        prove_recovery_key(vault, &right).expect("the real key opens the value");
+        assert!(
+            prove_recovery_key(vault, &wrong).is_err(),
+            "a wrong key must be refused"
+        );
+
+        // The recovery string must be 32 bytes of base64 and nothing else.
+        assert!(decode_recovery_key("not base64!!").is_err());
+        assert!(
+            decode_recovery_key(&base64::engine::general_purpose::STANDARD.encode([1u8; 16]))
+                .is_err()
+        );
+        assert_eq!(
+            &*decode_recovery_key(&base64::engine::general_purpose::STANDARD.encode(right))
+                .unwrap(),
+            &right[..]
+        );
+    }
+
+    #[test]
+    fn keychain_is_refreshed_only_for_an_existing_guarded_enrolment() {
+        // mode, prompt available, already enrolled
+        assert!(keychain_refresh_wanted("primary", true, true));
+        assert!(keychain_refresh_wanted("reauth", true, true));
+        // Never from a config string alone.
+        assert!(!keychain_refresh_wanted("primary", true, false));
+        // Never where no prompt could guard it.
+        assert!(!keychain_refresh_wanted("primary", false, true));
+        assert!(!keychain_refresh_wanted("disabled", true, true));
+    }
 
     #[test]
     fn suggest_default_vault_dir_returns_path() {

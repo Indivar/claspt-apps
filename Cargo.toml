@@ -20,3 +20,12 @@ lto = true
 codegen-units = 1
 opt-level = 3
 panic = "abort"
+
+# The mobile native library. `panic = "abort"` is right for the desktop
+# binary, but across UniFFI it turns any Rust panic into a process kill
+# instead of the InternalError the bindings would otherwise raise; a phone
+# handed a malformed bundle by a hostile server must get an exception it can
+# show, not a crash. Everything else matches release.
+[profile.mobile]
+inherits = "release"
+panic = "unwind"

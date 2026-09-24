@@ -31,6 +31,8 @@ import { useSearchStore } from "@/stores/search-store";
 import { useUIStore, applyUIScale } from "@/stores/ui-store";
 import { useVaultStore } from "@/stores/vault-store";
 import type { PageSummary, SecretSummary, LicenseStatus } from "@claspt/shared/types";
+import { licenseTierLabel } from "@/lib/license";
+import { useHasPro } from "@/hooks/use-has-pro";
 import { BrandLogo } from "@/components/BrandLogo";
 import { ShareBadge } from "@/components/ShareBadge";
 import { SyncStatusBar } from "@/components/SyncStatusBar";
@@ -665,6 +667,7 @@ export function Sidebar() {
   const [sortField, setSortField] = useState<SortField>("title");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
+  const hasPro = useHasPro();
   const settingsOpen = useUIStore((s) => s.settingsOpen);
 
   // Fetch license status on mount and whenever settings panel closes
@@ -907,31 +910,31 @@ export function Sidebar() {
       className="sidebar-panel sidebar-gradient flex shrink-0 flex-col border-r border-border"
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3">
-        <span className="flex items-center gap-2">
+      <div className="flex items-center justify-between gap-3 px-4 py-3">
+        <span className="flex items-center gap-2.5">
           <BrandLogo size="header" />
-          <span className="brand-gradient text-base font-extrabold tracking-tight">
-            Claspt
-          </span>
-          {licenseStatus && (
-            <span
-              className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${
-                licenseStatus.is_pro && !licenseStatus.is_expired
-                  ? "bg-accent/15 text-accent"
-                  : "bg-surface-overlay/60 text-text-muted"
-              }`}
-            >
-              {licenseStatus.is_trial
-                ? "Trial"
-                : licenseStatus.tier === "pro_plus"
-                  ? "Pro+"
-                  : licenseStatus.tier === "pro"
-                    ? "Pro"
-                    : "Free"}
+          {/* The plan sits above the wordmark rather than beside it. Beside it,
+              the two competed for a narrow sidebar's width and the name lost —
+              "Claspt" truncated to "C." to keep a pill reading "FREE". The
+              product's own name is the last thing that should give way. */}
+          <span className="flex flex-col items-start gap-0.5">
+            {licenseStatus && (
+              <span
+                className={`rounded-full border px-1.5 py-[1px] text-[9px] font-semibold uppercase leading-none tracking-wider ${
+                  licenseStatus.is_pro && !licenseStatus.is_expired
+                    ? "border-accent/35 bg-accent/10 text-accent"
+                    : "border-border/70 bg-surface-overlay/50 text-text-muted"
+                }`}
+              >
+                {licenseTierLabel(licenseStatus)}
+              </span>
+            )}
+            <span className="brand-gradient whitespace-nowrap text-base font-extrabold leading-none tracking-tight">
+              Claspt
             </span>
-          )}
+          </span>
         </span>
-        <div className="flex items-center gap-0.5">
+        <div className="flex shrink-0 items-center gap-0.5">
           <button
             onClick={() => handleScaleChange(-0.05)}
             className="icon-btn px-1 py-0.5 text-[13px] font-semibold text-text-muted"
@@ -1387,30 +1390,33 @@ export function Sidebar() {
                 />
               </svg>
             </button>
-            {/* 2. Share */}
-            <button
-              data-tour="sharing"
-              onClick={() => setShareModalOpen(true)}
-              className="icon-btn p-1 text-text-muted"
-              data-tooltip={kbd("Share (Mod+Shift+E)")}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M4 9v4a1 1 0 001 1h6a1 1 0 001-1V9"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M8 10V2M5 5l3-3 3 3"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
+            {/* 2. Share — with a licence only. It used to be here for
+                everyone and refuse once clicked. */}
+            {hasPro && (
+              <button
+                data-tour="sharing"
+                onClick={() => setShareModalOpen(true)}
+                className="icon-btn p-1 text-text-muted"
+                data-tooltip={kbd("Share (Mod+Shift+E)")}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path
+                    d="M4 9v4a1 1 0 001 1h6a1 1 0 001-1V9"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M8 10V2M5 5l3-3 3 3"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
             {/* 3. Import */}
             <button
               data-tour="import"
@@ -1467,17 +1473,27 @@ export function Sidebar() {
                 loadFolders();
               }}
               className="icon-btn p-1 text-text-muted"
-              data-tooltip="Refresh pages &amp; secrets"
+              data-tooltip="Reload this list from disk"
             >
+              {/* A list with an arrow returning to it, not the circular arrows
+                  the sync status uses. The two sat inches apart wearing the
+                  same glyph while doing unrelated things: this one re-reads the
+                  folder on this computer, that one talks to the server. */}
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <path
-                  d="M2 8a6 6 0 0110.47-4M14 8a6 6 0 01-10.47 4"
+                  d="M2.5 4h7M2.5 8h5M2.5 12h4"
                   stroke="currentColor"
                   strokeWidth="1.5"
                   strokeLinecap="round"
                 />
                 <path
-                  d="M13 1v3.5h-3.5M3 15v-3.5h3.5"
+                  d="M11 9.5a2.75 2.75 0 102.4 4.05"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M13.9 7.2v2.4h-2.4"
                   stroke="currentColor"
                   strokeWidth="1.5"
                   strokeLinecap="round"
@@ -1535,42 +1551,22 @@ export function Sidebar() {
           </div>
         </div>
         <ShareBadge />
-        {/* License status */}
-        {licenseStatus && (
-          <div className="flex items-center gap-1.5 px-1 py-0.5">
-            <span
-              className={`inline-flex items-center rounded px-1.5 py-px text-[10px] font-semibold leading-tight ${
-                licenseStatus.is_pro && !licenseStatus.is_expired
-                  ? "bg-success/15 text-success"
-                  : "bg-text-muted/15 text-text-muted"
-              }`}
-            >
-              {licenseStatus.is_trial
-                ? "Trial"
-                : licenseStatus.tier === "pro_plus"
-                  ? "Pro+"
-                  : licenseStatus.tier === "pro"
-                    ? "Pro"
-                    : "Free"}
-            </span>
-            {licenseStatus.email && (
-              <span
-                className="truncate text-[10px] text-text-muted"
-                title={licenseStatus.email}
-              >
-                {licenseStatus.email}
-              </span>
-            )}
-          </div>
-        )}
-        {/* Row 2: Sync + version inline */}
-        <div className="flex items-center gap-2">
-          <div className="min-w-0 flex-1">
-            <SyncStatusBar />
-          </div>
+        {/* The plan is shown once, in the header. It was here too, on a line of
+            its own, which both repeated it and pushed the sync status onto a
+            row it had to share with the version string. */}
+        <SyncStatusBar />
+        <div className="flex items-center gap-2 px-1">
           <span className="shrink-0 text-[11px] tracking-wider text-text-muted/60">
             v{VERSION_DISPLAY}
           </span>
+          {licenseStatus?.email && (
+            <span
+              className="truncate text-[10px] text-text-muted"
+              title={licenseStatus.email}
+            >
+              {licenseStatus.email}
+            </span>
+          )}
         </div>
       </div>
     </div>

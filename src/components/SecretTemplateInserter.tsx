@@ -3,8 +3,9 @@
 
 /**
  * Modal for inserting a new `:::secret[...]:::` block into the editor from a
- * predefined template (website login, credit card, bank account, API key, SSH
- * key, Wi-Fi, identity document) or a fully custom set of fields.
+ * built-in template (the shared list the extension uses too), one the owner
+ * saved under Settings › Automation › Templates, or a fully custom set of
+ * fields.
  *
  * The user fills in field values, then the block is inserted at the cursor as
  * plaintext markdown — encryption of the values happens later, on save, in the
@@ -17,109 +18,17 @@ import { insertAtCursor } from "@/components/editor/editor-api";
 import { CloseIcon } from "@/components/ui/icons";
 import { InlineGenerateButton } from "@/components/generator/InlineGenerateButton";
 import { isGeneratable } from "@/components/generator/generatable";
+import { TotpPreview } from "@/components/secret/TotpPreview";
+import { TOTP_FIELD_NAMES } from "@claspt/shared/credential-fields";
+import { oneLine } from "@claspt/shared/secret-templates";
+import { getTemplates } from "@/lib/commands";
+import { BUILT_IN_TEMPLATES, fromSaved } from "@/lib/template-picker";
+import type { Template } from "@/lib/template-picker";
 
-interface TemplateField {
-  key: string;
-  placeholder: string;
+/** Whether this field holds an authenticator key, by any accepted spelling. */
+function isTotpField(key: string): boolean {
+  return (TOTP_FIELD_NAMES as readonly string[]).includes(key.trim().toLowerCase());
 }
-
-interface Template {
-  id: string;
-  label: string;
-  icon: string;
-  fields: TemplateField[];
-}
-
-const TEMPLATES: Template[] = [
-  {
-    id: "login",
-    label: "Website Login",
-    icon: "globe",
-    fields: [
-      { key: "URL", placeholder: "https://example.com" },
-      { key: "Username", placeholder: "user@example.com" },
-      { key: "Password", placeholder: "" },
-      { key: "2FA Backup", placeholder: "" },
-    ],
-  },
-  {
-    id: "credit-card",
-    label: "Credit Card",
-    icon: "card",
-    fields: [
-      { key: "Card Number", placeholder: "4111 1111 1111 1111" },
-      { key: "Cardholder", placeholder: "Name on card" },
-      { key: "Expiry", placeholder: "MM/YY" },
-      { key: "CVV", placeholder: "123" },
-      { key: "PIN", placeholder: "" },
-    ],
-  },
-  {
-    id: "bank",
-    label: "Bank Account",
-    icon: "bank",
-    fields: [
-      { key: "Bank", placeholder: "Bank name" },
-      { key: "Account Number", placeholder: "" },
-      { key: "IFSC/SWIFT", placeholder: "" },
-      { key: "Branch", placeholder: "" },
-      { key: "Type", placeholder: "Savings / Current" },
-    ],
-  },
-  {
-    id: "api-key",
-    label: "API Key",
-    icon: "key",
-    fields: [
-      { key: "Service", placeholder: "Service name" },
-      { key: "API Key", placeholder: "" },
-      { key: "API Secret", placeholder: "" },
-      { key: "Endpoint", placeholder: "https://api.example.com" },
-    ],
-  },
-  {
-    id: "ssh",
-    label: "SSH Key",
-    icon: "terminal",
-    fields: [
-      { key: "Host", placeholder: "server.example.com" },
-      { key: "Username", placeholder: "root" },
-      { key: "Key Path", placeholder: "~/.ssh/id_ed25519" },
-      { key: "Passphrase", placeholder: "" },
-    ],
-  },
-  {
-    id: "wifi",
-    label: "Wi-Fi Network",
-    icon: "wifi",
-    fields: [
-      { key: "SSID", placeholder: "Network name" },
-      { key: "Password", placeholder: "" },
-      { key: "Security", placeholder: "WPA2 / WPA3" },
-    ],
-  },
-  {
-    id: "identity",
-    label: "Identity Document",
-    icon: "id",
-    fields: [
-      { key: "Type", placeholder: "Passport / License / Aadhaar" },
-      { key: "Number", placeholder: "" },
-      { key: "Issue Date", placeholder: "YYYY-MM-DD" },
-      { key: "Expiry Date", placeholder: "YYYY-MM-DD" },
-      { key: "Authority", placeholder: "" },
-    ],
-  },
-  {
-    id: "custom",
-    label: "Custom",
-    icon: "plus",
-    fields: [
-      { key: "Field 1", placeholder: "" },
-      { key: "Field 2", placeholder: "" },
-    ],
-  },
-];
 
 /** Renders the small SVG icon associated with a template category. */
 function TemplateIcon({ type }: { type: string }) {
@@ -228,6 +137,124 @@ function TemplateIcon({ type }: { type: string }) {
           />
         </svg>
       );
+    case "mail":
+      return (
+        <svg className={cls} viewBox="0 0 16 16" fill="none">
+          <rect
+            x="1.5"
+            y="3"
+            width="13"
+            height="10"
+            rx="2"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
+          <path d="M2 4.5l6 4.5 6-4.5" stroke="currentColor" strokeWidth="1.3" />
+        </svg>
+      );
+    case "server":
+      return (
+        <svg className={cls} viewBox="0 0 16 16" fill="none">
+          <rect
+            x="2"
+            y="2"
+            width="12"
+            height="5"
+            rx="1.5"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
+          <rect
+            x="2"
+            y="9"
+            width="12"
+            height="5"
+            rx="1.5"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
+          <circle cx="5" cy="4.5" r="0.8" fill="currentColor" />
+          <circle cx="5" cy="11.5" r="0.8" fill="currentColor" />
+        </svg>
+      );
+    case "database":
+      return (
+        <svg className={cls} viewBox="0 0 16 16" fill="none">
+          <ellipse
+            cx="8"
+            cy="4"
+            rx="5.5"
+            ry="2"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
+          <path
+            d="M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2"
+            stroke="currentColor"
+            strokeWidth="1.3"
+          />
+        </svg>
+      );
+    case "gear":
+      return (
+        <svg className={cls} viewBox="0 0 16 16" fill="none">
+          <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.5" />
+          <path
+            d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+          />
+        </svg>
+      );
+    case "licence":
+      return (
+        <svg className={cls} viewBox="0 0 16 16" fill="none">
+          <path
+            d="M4 1.5h5l3.5 3.5v9.5H4z"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M9 1.5V5h3.5M6 8.5h4M6 11h4"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+          />
+        </svg>
+      );
+    case "wallet":
+      return (
+        <svg className={cls} viewBox="0 0 16 16" fill="none">
+          <rect
+            x="1.5"
+            y="4"
+            width="13"
+            height="9"
+            rx="2"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
+          <path
+            d="M1.5 6.5h13M11 9.5h2"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+          />
+        </svg>
+      );
+    case "saved":
+      return (
+        <svg className={cls} viewBox="0 0 16 16" fill="none">
+          <path
+            d="M8 2l1.8 3.7 4.2.6-3 2.9.7 4.1L8 11.4l-3.7 1.9.7-4.1-3-2.9 4.2-.6z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
     default:
       return (
         <svg className={cls} viewBox="0 0 16 16" fill="none">
@@ -257,11 +284,14 @@ function FieldEditor({
   const [fields, setFields] = useState(
     isCustom
       ? [{ key: "", value: "" }]
-      : template.fields.map((f) => ({ key: f.key, value: "" })),
+      : template.fields.map((f) => ({ key: f.fieldKey ?? f.key, value: "" })),
   );
 
+  // Block fields are single lines; a pasted key or seed phrase is joined.
   const updateField = useCallback((index: number, key: string, value: string) => {
-    setFields((prev) => prev.map((f, i) => (i === index ? { key, value } : f)));
+    setFields((prev) =>
+      prev.map((f, i) => (i === index ? { key, value: oneLine(value) } : f)),
+    );
   }, []);
 
   const addField = useCallback(() => {
@@ -295,49 +325,61 @@ function FieldEditor({
       </div>
       <div className="space-y-2">
         {fields.map((field, i) => (
-          <div key={i} className="flex items-center gap-2">
-            {isCustom ? (
+          <div key={i}>
+            <div className="flex items-center gap-2">
+              {isCustom ? (
+                <input
+                  type="text"
+                  value={field.key}
+                  placeholder="Key"
+                  onChange={(e) => updateField(i, e.target.value, field.value)}
+                  className="focus-accent w-28 shrink-0 rounded-lg border border-border/60 bg-surface px-2 py-1.5 text-right text-[11px] text-text-primary outline-none"
+                />
+              ) : (
+                <span className="w-28 shrink-0 text-right text-xs text-text-muted">
+                  {template.fields[i]?.key}
+                </span>
+              )}
               <input
                 type="text"
-                value={field.key}
-                placeholder="Key"
-                onChange={(e) => updateField(i, e.target.value, field.value)}
-                className="focus-accent w-28 shrink-0 rounded-lg border border-border/60 bg-surface px-2 py-1.5 text-right text-[11px] text-text-primary outline-none"
+                value={field.value}
+                placeholder={isCustom ? "Value" : (template.fields[i]?.placeholder ?? "")}
+                onChange={(e) => updateField(i, field.key, e.target.value)}
+                className="focus-accent flex-1 rounded-lg border border-border/60 bg-surface px-3 py-1.5 text-[13px] text-text-primary outline-none"
               />
-            ) : (
-              <span className="w-28 shrink-0 text-right text-xs text-text-muted">
-                {template.fields[i]?.key}
-              </span>
+              {isGeneratable(field.key) && (
+                <InlineGenerateButton
+                  fieldKey={field.key}
+                  onValue={(v) => updateField(i, field.key, v)}
+                />
+              )}
+              {isCustom && (
+                <button
+                  onClick={() => removeField(i)}
+                  disabled={fields.length <= 1}
+                  className="shrink-0 rounded p-1 text-text-muted hover:bg-surface-overlay hover:text-danger disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-text-muted"
+                  title="Remove field"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M4 8h8"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                </button>
+              )}
+            </div>
+            {template.fields[i]?.hint && !field.value.trim() && (
+              <p className="ml-[7.5rem] mt-1 text-[11px] leading-relaxed text-text-muted">
+                {template.fields[i]?.hint}
+              </p>
             )}
-            <input
-              type="text"
-              value={field.value}
-              placeholder={isCustom ? "Value" : (template.fields[i]?.placeholder ?? "")}
-              onChange={(e) => updateField(i, field.key, e.target.value)}
-              className="focus-accent flex-1 rounded-lg border border-border/60 bg-surface px-3 py-1.5 text-[13px] text-text-primary outline-none"
-            />
-            {isGeneratable(field.key) && (
-              <InlineGenerateButton
-                fieldKey={field.key}
-                onValue={(v) => updateField(i, field.key, v)}
-              />
-            )}
-            {isCustom && (
-              <button
-                onClick={() => removeField(i)}
-                disabled={fields.length <= 1}
-                className="shrink-0 rounded p-1 text-text-muted hover:bg-surface-overlay hover:text-danger disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-text-muted"
-                title="Remove field"
-              >
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M4 8h8"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                  />
-                </svg>
-              </button>
+            {isTotpField(field.key) && (
+              <div className="ml-[7.5rem]">
+                <TotpPreview secret={field.value} />
+              </div>
             )}
           </div>
         ))}
@@ -398,6 +440,25 @@ export function SecretTemplateInserter() {
     return () => window.removeEventListener("keydown", handler);
   }, [templatePickerOpen, setTemplatePickerOpen]);
 
+  // The owner's saved templates (Settings › Automation › Templates), after
+  // the built-in ones. A vault without any, or a failed read, shows the
+  // built-ins alone.
+  const [saved, setSaved] = useState<Template[]>([]);
+  useEffect(() => {
+    if (!templatePickerOpen) return;
+    let cancelled = false;
+    getTemplates()
+      .then((list) => {
+        if (!cancelled) setSaved(list.map(fromSaved));
+      })
+      .catch(() => {
+        if (!cancelled) setSaved([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [templatePickerOpen]);
+
   if (!templatePickerOpen) return null;
 
   const handleInsert = (text: string) => {
@@ -432,7 +493,7 @@ export function SecretTemplateInserter() {
             />
           ) : (
             <div className="grid grid-cols-2 gap-2">
-              {TEMPLATES.map((t) => (
+              {[...BUILT_IN_TEMPLATES, ...saved].map((t) => (
                 <button
                   key={t.id}
                   onClick={() => setSelectedTemplate(t)}

@@ -47,6 +47,16 @@ pub enum VaultError {
 
     #[error("internal lock error")]
     LockPoisoned,
+
+    /// The password was changed, but the sync chain could not be re-keyed
+    /// under the new group key. Sync stays paused until it is.
+    #[error("Your password was changed. Sync could not be re-keyed under it ({0}). Open Sync settings and use Force Push to publish a fresh snapshot.")]
+    SyncRekeyFailed(String),
+
+    /// Carries its own message through to the user: the reason a recovery key
+    /// location was refused is the whole point of refusing it.
+    #[error("{0}")]
+    RecoveryKey(#[from] crate::vault::recovery_sheet::RecoverySheetError),
 }
 
 impl serde::Serialize for VaultError {

@@ -1,7 +1,14 @@
 // Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
+import { LOGO_DATA_URL } from "./logo-data";
 import type { DetectedField } from "./form-detector";
+import { hostIsIntact, guardHost, HOST_STYLE } from "./picker-integrity";
+import { buildRowMenu, lastUsedText, type RowMenuEntry } from "./picker-menu";
+import {
+  isSensitiveField,
+  hasTotp as hasTotpField,
+} from "@claspt/shared/credential-fields";
 import type { Credential, Message } from "@/shared/types";
 import { fillFields, isFillableOrigin } from "./form-filler";
 import { isDomainMismatch } from "@/shared/url-matching";
@@ -11,7 +18,8 @@ import {
   showInsecureOriginWarning,
   showUnverifiedSiteWarning,
 } from "./warnings";
-import { generateTotp } from "@/shared/totp";
+import { generateTotp } from "@claspt/shared/totp";
+import { readTotpSeed } from "@claspt/shared/credential-fields";
 import {
   generatePassword,
   generatePassphrase,
@@ -26,13 +34,25 @@ import {
   markGeneratedPasswordUsed,
   type RecordedAt,
 } from "@/shared/record-generated";
-import { credKey, loadCredState, markUsed, togglePin, sortByPinAndRecency, type CredState } from "@/shared/cred-state";
-import { isPrimary, isDeprecated, statusBucket, labelShowsUsername } from "@/shared/cred-flags";
+import {
+  credKey,
+  loadCredState,
+  markUsed,
+  togglePin,
+  sortByPinAndRecency,
+  type CredState,
+} from "@/shared/cred-state";
+import {
+  isPrimary,
+  isDeprecated,
+  statusBucket,
+  labelShowsUsername,
+} from "@/shared/cred-flags";
 // Vite resolves `?inline` to the CSS file's text contents at build time so we
 // can inject the same stylesheet into a closed shadow root for clickjacking
 // hardening. Page CSS can't reach inside the shadow tree.
-// eslint-disable-next-line import/no-unresolved
 import dropdownCss from "./styles.css?inline";
+import { isPaidPlan, planLabel } from "@/shared/plan-label";
 
 /**
  * True when this content script is running inside a cross-origin iframe.
@@ -99,7 +119,9 @@ function loadGenPrefs(): Promise<InlineGenPrefs> {
   return new Promise((resolve) => {
     try {
       chrome.storage.local.get(STORAGE_KEY_INLINE_GEN_PREFS, (data) => {
-        const stored = data?.[STORAGE_KEY_INLINE_GEN_PREFS] as Partial<InlineGenPrefs> | undefined;
+        const stored = data?.[STORAGE_KEY_INLINE_GEN_PREFS] as
+          | Partial<InlineGenPrefs>
+          | undefined;
         resolve({ ...DEFAULT_GEN_PREFS, ...(stored ?? {}) });
       });
     } catch {
@@ -109,12 +131,19 @@ function loadGenPrefs(): Promise<InlineGenPrefs> {
 }
 
 function saveGenPrefs(prefs: InlineGenPrefs) {
-  try { chrome.storage.local.set({ [STORAGE_KEY_INLINE_GEN_PREFS]: prefs }); } catch { /* ignore */ }
+  try {
+    chrome.storage.local.set({ [STORAGE_KEY_INLINE_GEN_PREFS]: prefs });
+  } catch {
+    /* ignore */
+  }
 }
 
 const ICON_CLASS = "claspt-inline-icon";
 const DROPDOWN_CLASS = "claspt-inline-dropdown";
 const HOST_CLASS = "claspt-inline-dropdown-host";
+/** The dropdown host currently on the page, checked before any action. */
+let activeHost: HTMLElement | null = null;
+let activeHostGuard: MutationObserver | null = null;
 
 const attachedFields = new WeakSet<HTMLInputElement>();
 let cachedCredentials: Credential[] | null = null;
@@ -122,13 +151,13 @@ let credentialsFetched = false;
 
 export function injectInlineIcons(
   fields: DetectedField[],
-  getCredentials: () => Promise<Credential[]>
+  getCredentials: () => Promise<Credential[]>,
 ) {
   // Refuse to render inside cross-origin iframes. A malicious top frame can
   // overlay/click-bait the autofill icon to harvest credentials otherwise.
   if (inCrossOriginIframe()) return;
   const targetFields = fields.filter(
-    (f) => f.type === "password" || f.type === "username" || f.type === "email"
+    (f) => f.type === "password" || f.type === "username" || f.type === "email",
   );
   if (!credentialsFetched) {
     credentialsFetched = true;
@@ -160,7 +189,9 @@ function updateIconColor(icon: HTMLElement, hasCredentials: boolean, count?: num
     img.style.outline = hasCredentials ? "2px solid #16a34a" : "none";
     img.style.outlineOffset = "1px";
   }
-  icon.title = hasCredentials ? `Claspt — ${count ?? ""} credential${(count ?? 0) !== 1 ? "s" : ""} found` : "Claspt — Generate password";
+  icon.title = hasCredentials
+    ? `Claspt — ${count ?? ""} credential${(count ?? 0) !== 1 ? "s" : ""} found`
+    : "Claspt — Generate password";
 
   // Add/update count badge
   let badge = icon.querySelector(".claspt-icon-badge") as HTMLElement | null;
@@ -201,7 +232,7 @@ function createSearchSvg(): SVGElement {
 function createIconElement(): HTMLElement {
   // Use the actual Claspt logo image instead of a generic lock SVG
   const img = document.createElement("img");
-  img.src = chrome.runtime.getURL("assets/logo-claspt.png");
+  img.src = LOGO_DATA_URL;
   img.width = 20;
   img.height = 20;
   img.style.borderRadius = "3px";
@@ -209,7 +240,11 @@ function createIconElement(): HTMLElement {
   return img;
 }
 
-function attachIcon(input: HTMLInputElement, allFields: DetectedField[], getCredentials: () => Promise<Credential[]>) {
+function attachIcon(
+  input: HTMLInputElement,
+  allFields: DetectedField[],
+  getCredentials: () => Promise<Credential[]>,
+) {
   const parent = input.parentElement;
   if (!parent) return;
   if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
@@ -218,7 +253,8 @@ function attachIcon(input: HTMLInputElement, allFields: DetectedField[], getCred
   icon.className = ICON_CLASS;
   icon.title = "Claspt";
   icon.appendChild(createIconElement());
-  if (cachedCredentials !== null) updateIconColor(icon, cachedCredentials.length > 0, cachedCredentials.length);
+  if (cachedCredentials !== null)
+    updateIconColor(icon, cachedCredentials.length > 0, cachedCredentials.length);
   parent.appendChild(icon);
 
   let isOpen = false;
@@ -226,7 +262,9 @@ function attachIcon(input: HTMLInputElement, allFields: DetectedField[], getCred
     e.preventDefault();
     e.stopPropagation();
     if (!isOpen) {
-      showDropdown(icon, input, allFields, getCredentials, () => { isOpen = false; });
+      showDropdown(icon, input, allFields, getCredentials, () => {
+        isOpen = false;
+      });
       isOpen = true;
     } else {
       closeAllDropdowns();
@@ -235,7 +273,13 @@ function attachIcon(input: HTMLInputElement, allFields: DetectedField[], getCred
   });
 }
 
-async function showDropdown(icon: HTMLElement, input: HTMLInputElement, allFields: DetectedField[], getCredentials: () => Promise<Credential[]>, onClose: () => void) {
+async function showDropdown(
+  icon: HTMLElement,
+  input: HTMLInputElement,
+  allFields: DetectedField[],
+  getCredentials: () => Promise<Credential[]>,
+  onClose: () => void,
+) {
   closeAllDropdowns();
   if (cachedCredentials === null) {
     cachedCredentials = await getCredentials();
@@ -243,14 +287,23 @@ async function showDropdown(icon: HTMLElement, input: HTMLInputElement, allField
   }
 
   const credState = await loadCredState();
-  const dropdown = createRichDropdown(cachedCredentials, input, allFields, onClose, credState);
+  const dropdown = createRichDropdown(
+    cachedCredentials,
+    input,
+    allFields,
+    onClose,
+    credState,
+  );
 
   // Closed shadow DOM host — page CSS / JS can't reach inside, so an
   // attacker can't restyle, hide, or interact with the picker via the
   // page DOM. `all: initial` neutralises any inherited styles.
   const host = document.createElement("div");
   host.className = HOST_CLASS;
-  host.style.cssText = "all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647;";
+  host.style.cssText = HOST_STYLE;
+  activeHost = host;
+  activeHostGuard?.disconnect();
+  activeHostGuard = guardHost(host, HOST_CLASS);
   const root = host.attachShadow({ mode: "closed" });
   const styleEl = document.createElement("style");
   styleEl.textContent = dropdownCss;
@@ -273,7 +326,10 @@ async function showDropdown(icon: HTMLElement, input: HTMLInputElement, allField
     cleanup();
   };
   const keyHandler = (ev: KeyboardEvent) => {
-    if (ev.key === "Escape") { host.remove(); cleanup(); }
+    if (ev.key === "Escape") {
+      host.remove();
+      cleanup();
+    }
   };
   function cleanup() {
     document.removeEventListener("mousedown", closeHandler, true);
@@ -300,7 +356,13 @@ function positionDropdown(dropdown: HTMLElement, anchor: HTMLElement) {
   dropdown.style.width = `${w}px`;
 }
 
-function createRichDropdown(credentials: Credential[], input: HTMLInputElement, allFields: DetectedField[], onClose: () => void, credState: CredState): HTMLElement {
+function createRichDropdown(
+  credentials: Credential[],
+  input: HTMLInputElement,
+  allFields: DetectedField[],
+  onClose: () => void,
+  credState: CredState,
+): HTMLElement {
   const dropdown = mk("div", DROPDOWN_CLASS);
   // Live state — re-rendered when a row toggles pin or fill happens.
   let activeState: CredState = credState;
@@ -309,8 +371,9 @@ function createRichDropdown(credentials: Credential[], input: HTMLInputElement, 
   //    "Claspt Inline" mockup). Real app logo, no dummy gradient. ──
   const header = mk("div", "claspt-dd-fly-head");
   const logoImg = document.createElement("img");
-  logoImg.src = chrome.runtime.getURL("assets/logo-claspt.png");
-  logoImg.width = 22; logoImg.height = 22;
+  logoImg.src = LOGO_DATA_URL;
+  logoImg.width = 22;
+  logoImg.height = 22;
   logoImg.className = "claspt-dd-fly-logo";
   header.appendChild(logoImg);
   const nameEl = mk("span", "claspt-dd-fly-name");
@@ -320,6 +383,13 @@ function createRichDropdown(credentials: Credential[], input: HTMLInputElement, 
   const pillEl = mk("span", "claspt-dd-fly-pill");
   pillEl.style.display = "none";
   header.appendChild(pillEl);
+  const versionEl = mk("span", "claspt-dd-fly-version");
+  try {
+    versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
+  } catch {
+    versionEl.textContent = "";
+  }
+  header.appendChild(versionEl);
   const domainEl = mk("span", "claspt-dd-fly-domain");
   domainEl.textContent = location.hostname;
   header.appendChild(domainEl);
@@ -331,13 +401,15 @@ function createRichDropdown(credentials: Credential[], input: HTMLInputElement, 
     chrome.runtime.sendMessage({ type: "GET_STATUS" } as Message, (res: Message) => {
       if (res?.type === "STATUS_RESULT") {
         if (res.plan) {
-          pillEl.textContent = res.plan === "pro_plus" ? "Pro+" : res.plan === "pro" ? "Pro" : res.plan;
+          pillEl.textContent = planLabel(res.plan);
           pillEl.style.display = "";
-          if (res.plan === "Free" || res.plan === "Trial") pillEl.classList.add("is-muted");
+          if (!isPaidPlan(res.plan)) pillEl.classList.add("is-muted");
         }
       }
     });
-  } catch { /* extension context invalidated — ignore */ }
+  } catch {
+    /* extension context invalidated — ignore */
+  }
 
   // ── Search ──
   const searchWrap = mk("div", "claspt-dd-search-wrap");
@@ -359,50 +431,58 @@ function createRichDropdown(credentials: Credential[], input: HTMLInputElement, 
     const ranked = sortByPinAndRecency(list, activeState);
     return [...ranked].sort((a, b) => statusBucket(a) - statusBucket(b));
   };
-  const rerender = (list: Credential[]) => renderCredentials(credsSection, fullSort(list), allFields, onClose, activeState, async (key) => {
-    activeState = await togglePin(key);
-    rerender(list);
-  });
+  const rerender = (list: Credential[]) =>
+    renderCredentials(
+      credsSection,
+      fullSort(list),
+      allFields,
+      onClose,
+      activeState,
+      async (key) => {
+        activeState = await togglePin(key);
+        rerender(list);
+      },
+    );
   rerender(credentials);
   dropdown.appendChild(credsSection);
 
-  // Client-side filter on the already-loaded credentials. Falls back to the
-  // backend search when there are no domain matches at all.
-  let vaultSearchTimer: ReturnType<typeof setTimeout> | null = null;
+  // Client-side filter on the already-loaded credentials, which are the ones
+  // this site may see. The picker used to fall back to a vault-wide search
+  // sent from the page, which the worker refuses (that message is popup-only,
+  // and a page has no business enumerating the vault), so the fallback never
+  // returned anything; it was a dead request. Searching the whole vault is
+  // what the popup is for.
   let zeroMatchCloseTimer: ReturnType<typeof setTimeout> | null = null;
   const cancelZeroClose = () => {
-    if (zeroMatchCloseTimer) { clearTimeout(zeroMatchCloseTimer); zeroMatchCloseTimer = null; }
+    if (zeroMatchCloseTimer) {
+      clearTimeout(zeroMatchCloseTimer);
+      zeroMatchCloseTimer = null;
+    }
   };
   searchInput.addEventListener("input", () => {
     cancelZeroClose();
-    if (vaultSearchTimer) { clearTimeout(vaultSearchTimer); vaultSearchTimer = null; }
     const q = searchInput.value.trim().toLowerCase();
-    if (!q) { rerender(credentials); return; }
+    if (!q) {
+      rerender(credentials);
+      return;
+    }
 
     const local = filterCredentials(credentials, q);
     rerender(local);
 
-    // Only fall back to a vault-wide search if local results are empty AND
-    // there's a non-trivial query — debounced to avoid flooding the API.
     if (local.length === 0 && q.length >= 2) {
-      vaultSearchTimer = setTimeout(() => {
-        chrome.runtime.sendMessage({ type: "SEARCH_CREDENTIALS", query: q } as Message, (res: Message) => {
-          if (searchInput.value.trim().toLowerCase() !== q) return; // stale
-          if (res?.type === "SEARCH_RESULT" && res.credentials.length > 0) {
-            rerender(res.credentials);
-          } else {
-            // 1Password pattern — when filter genuinely matches nothing, fade
-            // the picker out so we don't visually harass the page.
-            zeroMatchCloseTimer = setTimeout(() => {
-              if (searchInput.value.trim().toLowerCase() === q) {
-                dropdown.style.transition = "opacity 0.2s";
-                dropdown.style.opacity = "0";
-                setTimeout(() => { dropdown.remove(); onClose(); }, 200);
-              }
-            }, 800);
-          }
-        });
-      }, 250);
+      // 1Password pattern: when the filter genuinely matches nothing, fade
+      // the picker out so it does not visually harass the page.
+      zeroMatchCloseTimer = setTimeout(() => {
+        if (searchInput.value.trim().toLowerCase() === q) {
+          dropdown.style.transition = "opacity 0.2s";
+          dropdown.style.opacity = "0";
+          setTimeout(() => {
+            dropdown.remove();
+            onClose();
+          }, 200);
+        }
+      }, 1200);
     }
   });
 
@@ -422,8 +502,10 @@ function createRichDropdown(credentials: Credential[], input: HTMLInputElement, 
   genBtn.type = "button";
   // Lightning bolt icon (Lucide-style, 14x14)
   const boltSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  boltSvg.setAttribute("width", "14"); boltSvg.setAttribute("height", "14");
-  boltSvg.setAttribute("viewBox", "0 0 24 24"); boltSvg.setAttribute("fill", "currentColor");
+  boltSvg.setAttribute("width", "14");
+  boltSvg.setAttribute("height", "14");
+  boltSvg.setAttribute("viewBox", "0 0 24 24");
+  boltSvg.setAttribute("fill", "currentColor");
   const boltPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
   boltPath.setAttribute("d", "M13 2 3 14h7l-1 8 10-12h-7l1-8z");
   boltSvg.appendChild(boltPath);
@@ -432,7 +514,8 @@ function createRichDropdown(credentials: Credential[], input: HTMLInputElement, 
   genLabelSpan.textContent = "Generate password";
   genBtn.appendChild(genLabelSpan);
   genBtn.addEventListener("click", (e) => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     genExpanded = !genExpanded;
     genContainer.style.display = genExpanded ? "block" : "none";
     credsSection.style.display = genExpanded ? "none" : "";
@@ -447,13 +530,16 @@ function createRichDropdown(credentials: Credential[], input: HTMLInputElement, 
   );
   vaultBtn.classList.add("claspt-dd-fly-vault");
   vaultBtn.addEventListener("click", (e) => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     // Open the popup's full UI in a new tab — Chrome extensions can target
     // their own popup html as a regular tab.
     try {
       const url = chrome.runtime.getURL("src/popup/index.html");
       chrome.tabs?.create?.({ url, active: true });
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   });
 
   foot.appendChild(genBtn);
@@ -464,26 +550,45 @@ function createRichDropdown(credentials: Credential[], input: HTMLInputElement, 
 }
 
 // ── SVG icon paths (Lucide-style, 24x24 viewBox) ──
-const ICON_EYE_OPEN = "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z|M12 12m-3 0a3 3 0 1 0 6 0 3 3 0 1 0-6 0";
-const ICON_EYE_CLOSED = "M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24|M1 1 23 23";
-const ICON_FILL = "M15 3h6v6|M10 14 21 3|M21 3v18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6";
-const ICON_COPY = "M9 9V4.5A1.5 1.5 0 0 1 10.5 3h9A1.5 1.5 0 0 1 21 4.5v9a1.5 1.5 0 0 1-1.5 1.5H15|M15 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3";
+const ICON_EYE_OPEN =
+  "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z|M12 12m-3 0a3 3 0 1 0 6 0 3 3 0 1 0-6 0";
+const ICON_EYE_CLOSED =
+  "M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24|M1 1 23 23";
+const ICON_FILL =
+  "M15 3h6v6|M10 14 21 3|M21 3v18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6";
+const ICON_COPY =
+  "M9 9V4.5A1.5 1.5 0 0 1 10.5 3h9A1.5 1.5 0 0 1 21 4.5v9a1.5 1.5 0 0 1-1.5 1.5H15|M15 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3";
 const ICON_CHECK = "M20 6 9 17l-5-5";
 // Field-type icons
-const ICON_USER = "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2|M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8";
-const ICON_KEY = "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4";
-const ICON_LINK = "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71|M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71";
-const ICON_MAIL = "M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z|M22 6l-10 7L2 6";
-const ICON_FIELD = "M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7|M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z";
+const ICON_USER =
+  "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2|M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8";
+const ICON_KEY =
+  "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4";
+const ICON_LINK =
+  "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71|M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71";
+const ICON_MAIL =
+  "M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z|M22 6l-10 7L2 6";
+const ICON_FIELD =
+  "M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7|M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z";
 
 /** Map field key names to { icon, color } */
 function fieldIconInfo(key: string): { icon: string; color: string } {
   const k = key.toLowerCase();
-  if (k === "username" || k === "user" || k === "login" || k === "account") return { icon: ICON_USER, color: "#3b82f6" };     // blue
-  if (k === "password" || k === "pass" || k === "secret" || k === "key" || k === "api key" || k === "api_key") return { icon: ICON_KEY, color: "#f59e0b" };      // amber
-  if (k === "url" || k === "site" || k === "website" || k === "host" || k === "hostname") return { icon: ICON_LINK, color: "#10b981" };    // green
-  if (k === "email" || k === "e-mail") return { icon: ICON_MAIL, color: "#8b5cf6" };     // purple
-  return { icon: ICON_FIELD, color: "#6b7280" };  // gray
+  if (k === "username" || k === "user" || k === "login" || k === "account")
+    return { icon: ICON_USER, color: "#3b82f6" }; // blue
+  if (
+    k === "password" ||
+    k === "pass" ||
+    k === "secret" ||
+    k === "key" ||
+    k === "api key" ||
+    k === "api_key"
+  )
+    return { icon: ICON_KEY, color: "#f59e0b" }; // amber
+  if (k === "url" || k === "site" || k === "website" || k === "host" || k === "hostname")
+    return { icon: ICON_LINK, color: "#10b981" }; // green
+  if (k === "email" || k === "e-mail") return { icon: ICON_MAIL, color: "#8b5cf6" }; // purple
+  return { icon: ICON_FIELD, color: "#6b7280" }; // gray
 }
 
 function mkSvg(pathData: string, size = 14): SVGElement {
@@ -513,7 +618,8 @@ function fastTooltip(el: HTMLElement, text: string) {
     timer = setTimeout(() => {
       tip = document.createElement("div");
       tip.textContent = text;
-      tip.style.cssText = "position:fixed; z-index:2147483647; background:#1c2128; color:#e6edf3; font-size:10px; padding:3px 7px; border-radius:4px; pointer-events:none; white-space:nowrap; box-shadow:0 2px 8px rgba(0,0,0,0.3);";
+      tip.style.cssText =
+        "position:fixed; z-index:2147483647; background:#1c2128; color:#e6edf3; font-size:10px; padding:3px 7px; border-radius:4px; pointer-events:none; white-space:nowrap; box-shadow:0 2px 8px rgba(0,0,0,0.3);";
       document.body.appendChild(tip);
       const rect = el.getBoundingClientRect();
       tip.style.top = `${rect.top - 26}px`;
@@ -521,17 +627,32 @@ function fastTooltip(el: HTMLElement, text: string) {
     }, 300);
   });
   el.addEventListener("mouseleave", () => {
-    if (timer) { clearTimeout(timer); timer = null; }
-    if (tip) { tip.remove(); tip = null; }
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (tip) {
+      tip.remove();
+      tip = null;
+    }
   });
 }
 
-function mkIconBtn(iconPath: string, title: string, color: string, size = 14): HTMLButtonElement {
+function mkIconBtn(
+  iconPath: string,
+  title: string,
+  color: string,
+  size = 14,
+): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.style.cssText = `border:1px solid #c0c4cc; background:none; border-radius:5px; width:24px; height:22px; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; transition:all 0.1s; color:${color};`;
   btn.appendChild(mkSvg(iconPath, size));
-  btn.addEventListener("mouseenter", () => { btn.style.borderColor = color; });
-  btn.addEventListener("mouseleave", () => { btn.style.borderColor = "#c0c4cc"; });
+  btn.addEventListener("mouseenter", () => {
+    btn.style.borderColor = color;
+  });
+  btn.addEventListener("mouseleave", () => {
+    btn.style.borderColor = "#c0c4cc";
+  });
   fastTooltip(btn, title);
   return btn;
 }
@@ -571,6 +692,11 @@ function doFill(
   onClose: () => void,
   options?: { submit?: boolean },
 ) {
+  if (activeHost && !hostIsIntact(activeHost)) {
+    console.warn("[Claspt] Refused to fill: the picker was tampered with by the page");
+    onClose();
+    return;
+  }
   // Enforce the same guards the message-driven fill path uses, so the inline
   // picker can't be a weaker door: refuse to fill on an insecure origin or when
   // the credential's saved domain doesn't match the current site (phishing),
@@ -624,6 +750,15 @@ function copyText(text: string, autoClear = true) {
   chrome.runtime.sendMessage({ type: "COPY_TO_CLIPBOARD", text, autoClear } as Message);
 }
 
+/** Copy the current six digits for a seed; the seed itself never leaves the vault. */
+function copyTotpCode(seed: string) {
+  void generateTotp(seed)
+    .then(({ code }) => copyText(code, true))
+    .catch(() => {
+      /* not a valid seed: nothing to copy */
+    });
+}
+
 function patchCredField(cred: Credential, key: string, value: string) {
   // Fire-and-forget — the cache invalidates on success and the picker will
   // refresh next time it's opened. We close the dropdown after toggling so
@@ -648,7 +783,11 @@ function patchCredField(cred: Credential, key: string, value: string) {
  */
 function showInlineForm(
   wrapper: HTMLElement,
-  build: (panel: HTMLElement, removeForm: () => void, setError: (msg: string) => void) => void,
+  build: (
+    panel: HTMLElement,
+    removeForm: () => void,
+    setError: (msg: string) => void,
+  ) => void,
 ): void {
   const hidden: HTMLElement[] = [];
   for (const child of Array.from(wrapper.children) as HTMLElement[]) {
@@ -674,12 +813,21 @@ function showInlineForm(
   wrapper.appendChild(panel);
   // Auto-focus the first text-like input so the user can type immediately.
   setTimeout(() => {
-    const first = panel.querySelector<HTMLInputElement>("input[type='text'], input[type='password'], input:not([type])");
-    if (first) { first.focus(); first.select?.(); }
+    const first = panel.querySelector<HTMLInputElement>(
+      "input[type='text'], input[type='password'], input:not([type])",
+    );
+    if (first) {
+      first.focus();
+      first.select?.();
+    }
   }, 0);
 }
 
-function mkFormButton(label: string, primary?: boolean, danger?: boolean): HTMLButtonElement {
+function mkFormButton(
+  label: string,
+  primary?: boolean,
+  danger?: boolean,
+): HTMLButtonElement {
   const btn = mk("button", "claspt-dd-form-btn") as HTMLButtonElement;
   if (primary) btn.classList.add("is-primary");
   if (danger) btn.classList.add("is-danger");
@@ -688,7 +836,11 @@ function mkFormButton(label: string, primary?: boolean, danger?: boolean): HTMLB
   return btn;
 }
 
-function mkFormInput(type: "text" | "password", placeholder: string, value: string): HTMLInputElement {
+function mkFormInput(
+  type: "text" | "password",
+  placeholder: string,
+  value: string,
+): HTMLInputElement {
   const i = document.createElement("input");
   i.type = type;
   i.placeholder = placeholder;
@@ -714,238 +866,183 @@ function editCredentialInline(
     const sub = mk("div", "claspt-dd-form-sub");
     sub.textContent = cred.label;
 
-    const userLbl = mk("label", "claspt-dd-form-label"); userLbl.textContent = "Username";
+    const userLbl = mk("label", "claspt-dd-form-label");
+    userLbl.textContent = "Username";
     const userInp = mkFormInput("text", "username", currentUser ?? "");
 
-    const passLbl = mk("label", "claspt-dd-form-label"); passLbl.textContent = "Password";
+    const passLbl = mk("label", "claspt-dd-form-label");
+    passLbl.textContent = "Password";
     const passWrap = mk("div", "claspt-dd-form-input-wrap");
     const passInp = mkFormInput("password", "password", currentPass ?? "");
     const eyeBtn = mkIconBtn(ICON_EYE_OPEN, "Reveal", "#6b7280", 13);
     eyeBtn.classList.add("claspt-dd-form-eye");
     eyeBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       const showing = passInp.type === "text";
       passInp.type = showing ? "password" : "text";
-      eyeBtn.replaceChildren(); eyeBtn.appendChild(mkSvg(showing ? ICON_EYE_OPEN : ICON_EYE_CLOSED, 13));
+      eyeBtn.replaceChildren();
+      eyeBtn.appendChild(mkSvg(showing ? ICON_EYE_OPEN : ICON_EYE_CLOSED, 13));
     });
-    passWrap.appendChild(passInp); passWrap.appendChild(eyeBtn);
+    passWrap.appendChild(passInp);
+    passWrap.appendChild(eyeBtn);
 
     const actions = mk("div", "claspt-dd-form-actions");
     const cancelBtn = mkFormButton("Cancel");
     const saveBtn = mkFormButton("Save", true);
     cancelBtn.addEventListener("click", removeForm);
     saveBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       const fields: Record<string, string> = {};
       const u = userInp.value.trim();
       const p = passInp.value;
       if (u !== (currentUser ?? "")) fields.username = u;
       if (p !== (currentPass ?? "")) fields.password = p;
-      if (Object.keys(fields).length === 0) { removeForm(); return; }
-      saveBtn.disabled = true; saveBtn.textContent = "Saving…";
+      if (Object.keys(fields).length === 0) {
+        removeForm();
+        return;
+      }
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Saving…";
       chrome.runtime.sendMessage(
-        { type: "PATCH_SECRET_BLOCK", pagePath: cred.pagePath, label: cred.label, fields } as Message,
+        {
+          type: "PATCH_SECRET_BLOCK",
+          pagePath: cred.pagePath,
+          label: cred.label,
+          fields,
+        } as Message,
         (res: Message) => {
           if (res?.type === "PATCH_SECRET_BLOCK_RESULT" && res.success) {
             // Easiest way to reflect the change is a clean reopen — credentials
             // get re-fetched from the desktop on next click of the icon.
             closeAllDropdowns();
           } else {
-            saveBtn.disabled = false; saveBtn.textContent = "Save";
-            setError(res?.type === "PATCH_SECRET_BLOCK_RESULT"
-              ? (res.errorMessage ?? res.errorCode ?? "Unknown error")
-              : "No response from desktop");
+            saveBtn.disabled = false;
+            saveBtn.textContent = "Save";
+            setError(
+              res?.type === "PATCH_SECRET_BLOCK_RESULT"
+                ? (res.errorMessage ?? res.errorCode ?? "Unknown error")
+                : "No response from desktop",
+            );
           }
         },
       );
     });
-    actions.appendChild(cancelBtn); actions.appendChild(saveBtn);
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
 
     panel.appendChild(title);
     panel.appendChild(sub);
-    panel.appendChild(userLbl); panel.appendChild(userInp);
-    panel.appendChild(passLbl); panel.appendChild(passWrap);
+    panel.appendChild(userLbl);
+    panel.appendChild(userInp);
+    panel.appendChild(passLbl);
+    panel.appendChild(passWrap);
     panel.appendChild(actions);
   });
 }
 
-function renameCredentialInline(wrapper: HTMLElement, cred: Credential) {
-  showInlineForm(wrapper, (panel, removeForm, setError) => {
-    const title = mk("div", "claspt-dd-form-title");
-    title.textContent = "Rename label";
-    const sub = mk("div", "claspt-dd-form-sub");
-    sub.textContent = cred.label;
+let openRowMenu: HTMLElement | null = null;
 
-    const lbl = mk("label", "claspt-dd-form-label"); lbl.textContent = "New label";
-    const inp = mkFormInput("text", "label", cred.label);
-
-    const actions = mk("div", "claspt-dd-form-actions");
-    const cancelBtn = mkFormButton("Cancel");
-    const saveBtn = mkFormButton("Rename", true);
-    cancelBtn.addEventListener("click", removeForm);
-    saveBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
-      const next = inp.value.trim();
-      if (!next || next === cred.label) { removeForm(); return; }
-      saveBtn.disabled = true; saveBtn.textContent = "Renaming…";
-      chrome.runtime.sendMessage(
-        { type: "RENAME_SECRET_BLOCK", pagePath: cred.pagePath, oldLabel: cred.label, newLabel: next } as Message,
-        (res: Message) => {
-          if (res?.type === "RENAME_SECRET_BLOCK_RESULT" && res.success) {
-            closeAllDropdowns();
-          } else {
-            saveBtn.disabled = false; saveBtn.textContent = "Rename";
-            setError(res?.type === "RENAME_SECRET_BLOCK_RESULT"
-              ? (res.errorCode === "LABEL_CONFLICT"
-                  ? "That label is already used on this page."
-                  : (res.errorMessage ?? res.errorCode ?? "Unknown error"))
-              : "No response from desktop");
-          }
-        },
-      );
-    });
-    actions.appendChild(cancelBtn); actions.appendChild(saveBtn);
-
-    panel.appendChild(title);
-    panel.appendChild(sub);
-    panel.appendChild(lbl); panel.appendChild(inp);
-    panel.appendChild(actions);
-  });
-}
-
-function moveCredentialInline(wrapper: HTMLElement, cred: Credential) {
-  showInlineForm(wrapper, (panel, removeForm, setError) => {
-    const title = mk("div", "claspt-dd-form-title");
-    title.textContent = "Move to folder";
-    const sub = mk("div", "claspt-dd-form-sub");
-    sub.textContent = cred.label;
-
-    const lbl = mk("label", "claspt-dd-form-label"); lbl.textContent = "Folder path";
-    const inp = mkFormInput("text", "credentials", "");
-    const hint = mk("div", "claspt-dd-form-hint");
-    hint.textContent = "Examples: credentials · work · archive/old";
-
-    const actions = mk("div", "claspt-dd-form-actions");
-    const cancelBtn = mkFormButton("Cancel");
-    const saveBtn = mkFormButton("Move", true);
-    cancelBtn.addEventListener("click", removeForm);
-    saveBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
-      const next = inp.value.trim();
-      if (!next) { removeForm(); return; }
-      saveBtn.disabled = true; saveBtn.textContent = "Moving…";
-      chrome.runtime.sendMessage(
-        { type: "MOVE_PAGE", pagePath: cred.pagePath, folder: next } as Message,
-        (res: Message) => {
-          if (res?.type === "MOVE_PAGE_RESULT" && res.success) {
-            closeAllDropdowns();
-          } else {
-            saveBtn.disabled = false; saveBtn.textContent = "Move";
-            setError(res?.type === "MOVE_PAGE_RESULT"
-              ? (res.errorMessage ?? res.errorCode ?? "Unknown error")
-              : "No response from desktop");
-          }
-        },
-      );
-    });
-    actions.appendChild(cancelBtn); actions.appendChild(saveBtn);
-
-    panel.appendChild(title);
-    panel.appendChild(sub);
-    panel.appendChild(lbl); panel.appendChild(inp); panel.appendChild(hint);
-    panel.appendChild(actions);
-  });
-}
-
-function deleteCredentialInline(wrapper: HTMLElement, cred: Credential) {
-  showInlineForm(wrapper, (panel, removeForm, setError) => {
-    const title = mk("div", "claspt-dd-form-title");
-    title.textContent = `Delete credential?`;
-    const sub = mk("div", "claspt-dd-form-sub");
-    sub.textContent = cred.label;
-    const body = mk("div", "claspt-dd-form-body");
-    body.textContent =
-      "This removes the credential from the vault. If it's the only one on " +
-      "this page, the page will be deleted too. This can't be undone from " +
-      "the extension.";
-
-    const actions = mk("div", "claspt-dd-form-actions");
-    const cancelBtn = mkFormButton("Cancel");
-    const deleteBtn = mkFormButton("Delete", false, true);
-    cancelBtn.addEventListener("click", removeForm);
-    deleteBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
-      deleteBtn.disabled = true; deleteBtn.textContent = "Deleting…";
-      chrome.runtime.sendMessage(
-        {
-          type: "DELETE_SECRET_BLOCK",
-          pagePath: cred.pagePath,
-          label: cred.label,
-          deletePageIfEmpty: true,
-        } as Message,
-        (res: Message) => {
-          if (res?.type === "DELETE_SECRET_BLOCK_RESULT" && res.success) {
-            closeAllDropdowns();
-          } else {
-            deleteBtn.disabled = false; deleteBtn.textContent = "Delete";
-            setError(res?.type === "DELETE_SECRET_BLOCK_RESULT"
-              ? (res.errorMessage ?? res.errorCode ?? "Unknown error")
-              : "No response from desktop");
-          }
-        },
-      );
-    });
-    actions.appendChild(cancelBtn); actions.appendChild(deleteBtn);
-
-    panel.appendChild(title);
-    panel.appendChild(sub);
-    panel.appendChild(body);
-    panel.appendChild(actions);
-  });
-}
-
-interface RowMenuItem { label: string; danger?: boolean; onClick: () => void; }
-
-function showRowMenu(anchor: HTMLElement, items: RowMenuItem[]) {
+function showRowMenu(anchor: HTMLElement, items: RowMenuEntry[]) {
   // Close any existing row menu first.
-  document.querySelectorAll(`.claspt-dd-row-menu`).forEach((el) => el.remove());
+  openRowMenu?.remove();
+  openRowMenu = null;
 
   const menu = mk("div", "claspt-dd-row-menu");
   for (const it of items) {
+    if ("separator" in it) {
+      menu.appendChild(mk("div", "claspt-dd-row-menu-sep"));
+      continue;
+    }
     const btn = document.createElement("button");
     btn.className = `claspt-dd-row-menu-item${it.danger ? " is-danger" : ""}`;
-    btn.textContent = it.label;
+    if (it.icon) btn.appendChild(mkSvg(it.icon, 13));
+    const text = document.createElement("span");
+    text.textContent = it.label;
+    btn.appendChild(text);
     btn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       menu.remove();
+      openRowMenu = null;
+      // A page that restyled the host could have steered this click.
+      if (activeHost && !hostIsIntact(activeHost)) {
+        console.warn(
+          "[Claspt] Ignored a click: the picker was tampered with by the page",
+        );
+        return;
+      }
       it.onClick();
     });
     menu.appendChild(btn);
   }
-  document.body.appendChild(menu);
+  // Inside the closed shadow root with the rest of the picker, where the
+  // page's CSS cannot reach it; it used to be appended to the page's body.
+  const root = anchor.getRootNode();
+  (root instanceof ShadowRoot ? root : document.body).appendChild(menu);
+  openRowMenu = menu;
   const rect = anchor.getBoundingClientRect();
   let left = rect.right - menu.offsetWidth;
   let top = rect.bottom + 4;
   if (left < 8) left = 8;
-  if (top + menu.offsetHeight > window.innerHeight - 8) top = rect.top - menu.offsetHeight - 4;
+  if (top + menu.offsetHeight > window.innerHeight - 8)
+    top = rect.top - menu.offsetHeight - 4;
   menu.style.top = `${top}px`;
   menu.style.left = `${left}px`;
 
   const close = (ev: MouseEvent) => {
-    if (!menu.contains(ev.target as Node)) {
+    // Events from inside a closed shadow root retarget to the host, so
+    // `contains` on the menu would close it on its own clicks.
+    if (!ev.composedPath().includes(menu)) {
       menu.remove();
+      if (openRowMenu === menu) openRowMenu = null;
       document.removeEventListener("mousedown", close, true);
     }
   };
   setTimeout(() => document.addEventListener("mousedown", close, true), 0);
 }
 
-function renderCredentials(container: HTMLElement, credentials: Credential[], allFields: DetectedField[], onClose: () => void, credState: CredState, onTogglePin: (key: string) => void) {
+/** Why the last credential fetch came back empty, when the worker said. */
+let lastEmptyReason: EmptyReason | undefined;
+
+type EmptyReason = Extract<Message, { type: "CREDENTIALS_RESULT" }>["reason"];
+
+export function setEmptyReason(reason: EmptyReason): void {
+  lastEmptyReason = reason;
+}
+
+/** An empty list means something different when the app is not there to ask. */
+export function emptyReasonText(reason: EmptyReason): string {
+  switch (reason) {
+    case "disconnected":
+      return "Claspt is not running. Open the Claspt app to fill from your vault.";
+    case "vault_locked":
+      return "The vault is locked. Unlock it in the Claspt app to fill.";
+    case "permission_needed":
+      return "Claspt needs permission to reach the app. Open the extension to allow it.";
+    case "desktop_too_old":
+      return "The Claspt app is older than this extension. Update the app to fill.";
+    case "unauthorized":
+      return "Claspt does not know this extension's key. Pair it again from Settings \u203a Integrations in the app.";
+    default:
+      return "No matching credentials — try searching";
+  }
+}
+
+function renderCredentials(
+  container: HTMLElement,
+  credentials: Credential[],
+  allFields: DetectedField[],
+  onClose: () => void,
+  credState: CredState,
+  onTogglePin: (key: string) => void,
+) {
   while (container.firstChild) container.removeChild(container.firstChild);
 
   if (credentials.length === 0) {
     const empty = mk("div", "claspt-dd-empty");
-    empty.textContent = "No matching credentials — try searching";
+    empty.textContent = emptyReasonText(lastEmptyReason);
     container.appendChild(empty);
     return;
   }
@@ -964,7 +1061,8 @@ function renderCredentials(container: HTMLElement, credentials: Credential[], al
   // exact-label match; everything else is a weaker similar match. When all
   // visible credentials are exact matches OR there are zero exact matches,
   // we skip the heading entirely (one bucket — no need to label it).
-  const tierOf = (c: Credential): "exact" | "similar" => (c.score ?? 0) >= 100 ? "exact" : "similar";
+  const tierOf = (c: Credential): "exact" | "similar" =>
+    (c.score ?? 0) >= 100 ? "exact" : "similar";
   const tiers = new Set(credentials.map(tierOf));
   const showTierHeaders = tiers.size >= 2;
   let lastTier: "exact" | "similar" | null = null;
@@ -982,9 +1080,15 @@ function renderCredentials(container: HTMLElement, credentials: Credential[], al
     const isPinned = !!credState.pinned[ckey];
     const isPrim = isPrimary(cred);
     const isDep = isDeprecated(cred);
-    const username = cred.fields["username"] || cred.fields["user"] || cred.fields["email"] || cred.fields["login"] || "";
-    const password = cred.fields["password"] || cred.fields["pass"] || cred.fields["secret"] || "";
-    const totp = cred.fields["totp"] || cred.fields["otp"] || cred.fields["2fa"] || "";
+    const username =
+      cred.fields["username"] ||
+      cred.fields["user"] ||
+      cred.fields["email"] ||
+      cred.fields["login"] ||
+      "";
+    const password =
+      cred.fields["password"] || cred.fields["pass"] || cred.fields["secret"] || "";
+    const totp = readTotpSeed(cred.fields);
     const wrapper = mk("div", "claspt-dd-item-wrapper");
 
     // Single-line row: [label · username] [view] [fill] [⋯]
@@ -995,11 +1099,18 @@ function renderCredentials(container: HTMLElement, credentials: Credential[], al
     const info = mk("div", "claspt-dd-row-info");
     info.title = `${cred.label}${username ? " — " + username : ""}`;
     info.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       doFill(allFields, cred, onClose);
     });
     // Pin / primary glyphs as small inline prefix next to the label —
     // replaces the old letter-avatar box.
+    const used = lastUsedText(credState.lastUsed[ckey]);
+    if (used) {
+      const usedEl = mk("span", "claspt-dd-row-used");
+      usedEl.textContent = used;
+      info.appendChild(usedEl);
+    }
     if (isPinned) {
       const star = mk("span", "claspt-dd-inline-pin");
       star.textContent = "★";
@@ -1030,13 +1141,15 @@ function renderCredentials(container: HTMLElement, credentials: Credential[], al
     const setDetail = (visible: boolean) => {
       detailVisible = visible;
       detailPanel.style.display = visible ? "block" : "none";
-      viewBtn.replaceChildren(); viewBtn.appendChild(mkSvg(visible ? ICON_EYE_CLOSED : ICON_EYE_OPEN));
+      viewBtn.replaceChildren();
+      viewBtn.appendChild(mkSvg(visible ? ICON_EYE_CLOSED : ICON_EYE_OPEN));
       viewBtn.title = visible ? "Hide credentials" : "View credentials";
     };
 
     const viewBtn = mkIconBtn(ICON_EYE_OPEN, "View credentials", "#6b7280");
     viewBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       const wasOpen = detailVisible;
       // Close whichever row is currently expanded — keeps the list height stable.
       expanded.close();
@@ -1052,64 +1165,36 @@ function renderCredentials(container: HTMLElement, credentials: Credential[], al
     fillBtn.style.cssText += "background:#a06b00; border-color:#a06b00;";
     fillBtn.querySelector("svg")?.setAttribute("stroke", "#fff");
     fillBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       doFill(allFields, cred, onClose);
     });
 
     // ⋯ menu button — Pin/Unpin, Copy username/password/TOTP, Edit in desktop
-    const menuBtn = mkIconBtn("M5 12h.01|M12 12h.01|M19 12h.01", "More actions", "#6b7280");
+    const menuBtn = mkIconBtn(
+      "M5 12h.01|M12 12h.01|M19 12h.01",
+      "More actions",
+      "#6b7280",
+    );
     menuBtn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
-      const menuItems: RowMenuItem[] = [
-        { label: isPinned ? "Unpin" : "Pin to top", onClick: () => onTogglePin(ckey) },
-        { label: "Fill form", onClick: () => doFill(allFields, cred, onClose) },
-        { label: "Fill & submit", onClick: () => doFill(allFields, cred, onClose, { submit: true }) },
-      ];
-      if (username) menuItems.push({ label: "Copy username", onClick: () => copyText(username, false) });
-      if (password) menuItems.push({ label: "Copy password", onClick: () => copyText(password, true) });
-      if (totp)
-        menuItems.push({
-          label: "Copy TOTP",
-          // Copy the current 6-digit CODE, not the raw seed. Putting the
-          // long-lived TOTP secret on the clipboard would let anything that
-          // reads the clipboard mint codes forever; the code expires in ~30s.
-          // generateTotp runs on Web Crypto locally (no privileged message).
-          onClick: () => {
-            void generateTotp(totp)
-              .then(({ code }) => copyText(code, true))
-              .catch(() => {
-                /* malformed seed — copy nothing rather than leak the seed */
-              });
-          },
-        });
-      menuItems.push({
-        label: isPrim ? "Unmark primary" : "Mark as primary",
-        onClick: () => patchCredField(cred, "primary", isPrim ? "" : "true"),
-      });
-      menuItems.push({
-        label: isDep ? "Restore (un-deprecate)" : "Mark as deprecated",
-        onClick: () => patchCredField(cred, "deprecated", isDep ? "" : "true"),
-      });
-      // ── v2.1.0: Full credential management — inline forms inside the
-      // dropdown (no window.prompt / window.confirm — those are unusable
-      // inside a content-script overlay; on many sites they steal focus
-      // or never render). Each form takes over the row's wrapper.
-      menuItems.push({
-        label: "Edit credential…",
-        onClick: () => editCredentialInline(wrapper, cred, username, password),
-      });
-      menuItems.push({
-        label: "Rename label…",
-        onClick: () => renameCredentialInline(wrapper, cred),
-      });
-      menuItems.push({
-        label: "Move to folder…",
-        onClick: () => moveCredentialInline(wrapper, cred),
-      });
-      menuItems.push({
-        label: "Delete credential…",
-        danger: true,
-        onClick: () => deleteCredentialInline(wrapper, cred),
+      e.preventDefault();
+      e.stopPropagation();
+      const menuItems = buildRowMenu({
+        pinned: isPinned,
+        primary: isPrim,
+        deprecated: isDep,
+        hasUsername: !!username,
+        hasPassword: !!password,
+        hasTotp: !!totp,
+        onTogglePin: () => onTogglePin(ckey),
+        onFill: () => doFill(allFields, cred, onClose),
+        onFillSubmit: () => doFill(allFields, cred, onClose, { submit: true }),
+        onCopyUsername: () => copyText(username, false),
+        onCopyPassword: () => copyText(password, true),
+        onCopyTotp: () => copyTotpCode(totp),
+        onTogglePrimary: () => patchCredField(cred, "primary", isPrim ? "" : "true"),
+        onToggleDeprecated: () => patchCredField(cred, "deprecated", isDep ? "" : "true"),
+        onEdit: () => editCredentialInline(wrapper, cred, username, password),
       });
       showRowMenu(menuBtn, menuItems);
     });
@@ -1131,33 +1216,53 @@ function renderCredentials(container: HTMLElement, credentials: Credential[], al
       fastTooltip(keyEl, key);
 
       const valEl = mk("span", "claspt-dd-detail-val");
-      const isSecret = key === "password" || key === "pass" || key === "secret";
+      const isSecret = isSensitiveField(key);
+      const isTotpKey = hasTotpField({ [key.toLowerCase()]: value });
       valEl.textContent = isSecret ? "••••••••" : value;
       if (isSecret) valEl.classList.add("is-secret");
 
-      if (isSecret) {
+      // A two-factor seed is never shown: the code is what a person needs,
+      // and the seed on screen is the seed in a screenshot.
+      if (isSecret && !isTotpKey) {
         const showBtn = mkIconBtn(ICON_EYE_OPEN, "Show password", "#6b7280", 12);
         let shown = false;
         showBtn.addEventListener("click", (e) => {
-          e.preventDefault(); e.stopPropagation();
+          e.preventDefault();
+          e.stopPropagation();
           shown = !shown;
           valEl.textContent = shown ? value : "••••••••";
           valEl.classList.toggle("is-secret", !shown);
-          showBtn.replaceChildren(); showBtn.appendChild(mkSvg(shown ? ICON_EYE_CLOSED : ICON_EYE_OPEN, 12));
+          showBtn.replaceChildren();
+          showBtn.appendChild(mkSvg(shown ? ICON_EYE_CLOSED : ICON_EYE_OPEN, 12));
         });
-        row.appendChild(keyEl); row.appendChild(valEl); row.appendChild(showBtn);
+        row.appendChild(keyEl);
+        row.appendChild(valEl);
+        row.appendChild(showBtn);
       } else {
-        row.appendChild(keyEl); row.appendChild(valEl);
+        row.appendChild(keyEl);
+        row.appendChild(valEl);
       }
 
-      // Copy icon (clipboard)
-      const copyBtn = mkIconBtn(ICON_COPY, "Copy", "#a06b00", 12);
+      // Copy icon (clipboard). Copies go through the worker so the configured
+      // clear timeout applies, including "never"; a fixed in-page timer used
+      // to ignore the setting and die on navigation. A seed copies its code.
+      const copyBtn = mkIconBtn(
+        ICON_COPY,
+        isTotpKey ? "Copy current code" : "Copy",
+        "#a06b00",
+        12,
+      );
       copyBtn.addEventListener("click", (e) => {
-        e.preventDefault(); e.stopPropagation();
-        navigator.clipboard.writeText(value);
-        copyBtn.replaceChildren(); copyBtn.appendChild(mkSvg(ICON_CHECK, 12));
-        setTimeout(() => { copyBtn.replaceChildren(); copyBtn.appendChild(mkSvg(ICON_COPY, 12)); }, 1200);
-        if (isSecret) setTimeout(() => { navigator.clipboard.writeText("").catch(() => {}); }, 30_000);
+        e.preventDefault();
+        e.stopPropagation();
+        if (isTotpKey) copyTotpCode(value);
+        else copyText(value, isSecret);
+        copyBtn.replaceChildren();
+        copyBtn.appendChild(mkSvg(ICON_CHECK, 12));
+        setTimeout(() => {
+          copyBtn.replaceChildren();
+          copyBtn.appendChild(mkSvg(ICON_COPY, 12));
+        }, 1200);
       });
       row.appendChild(copyBtn);
       detailPanel.appendChild(row);
@@ -1170,7 +1275,11 @@ function renderCredentials(container: HTMLElement, credentials: Credential[], al
   container.appendChild(list);
 }
 
-function createGeneratorSection(input: HTMLInputElement, allFields: DetectedField[], onClose: () => void): HTMLElement {
+function createGeneratorSection(
+  input: HTMLInputElement,
+  allFields: DetectedField[],
+  onClose: () => void,
+): HTMLElement {
   const section = mk("div", "claspt-dd-gen-section");
 
   const title = mk("div", "claspt-dd-gen-title");
@@ -1185,7 +1294,10 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
   // Mirrors the popup's Generator tab so the inline picker offers full
   // feature parity. Each mode swaps the option panel below.
   const modeTabs = mk("div", "claspt-dd-gen-mode-tabs");
-  const modeTabBtns: Record<GenMode, HTMLButtonElement> = {} as Record<GenMode, HTMLButtonElement>;
+  const modeTabBtns: Record<GenMode, HTMLButtonElement> = {} as Record<
+    GenMode,
+    HTMLButtonElement
+  >;
   const modeLabels: Record<GenMode, string> = {
     password: "Password",
     passphrase: "Passphrase",
@@ -1197,7 +1309,8 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
     const btn = mk("button", "claspt-dd-gen-mode-tab") as HTMLButtonElement;
     btn.textContent = modeLabels[m];
     btn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       prefs.mode = m;
       syncModeUi();
       regen();
@@ -1252,9 +1365,14 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
   pwRow.appendChild(pwText);
 
   const inlineBtns = mk("div", "claspt-dd-gen-inline-btns");
-  const regenBtn = mkIconBtn("M21 12a9 9 0 1 1-3.51-7.13|M21 4v5h-5", "Regenerate", "#6b7280");
+  const regenBtn = mkIconBtn(
+    "M21 12a9 9 0 1 1-3.51-7.13|M21 4v5h-5",
+    "Regenerate",
+    "#6b7280",
+  );
   regenBtn.addEventListener("click", (e) => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     pw = gen();
     pwText.textContent = pw;
     updateStr(pw);
@@ -1262,10 +1380,19 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
   });
   const copyBtn = mkIconBtn(ICON_COPY, "Copy", "#6b7280");
   copyBtn.addEventListener("click", (e) => {
-    e.preventDefault(); e.stopPropagation();
-    chrome.runtime.sendMessage({ type: "COPY_TO_CLIPBOARD", text: pw, autoClear: true } as Message);
-    copyBtn.replaceChildren(); copyBtn.appendChild(mkSvg(ICON_CHECK));
-    setTimeout(() => { copyBtn.replaceChildren(); copyBtn.appendChild(mkSvg(ICON_COPY)); }, 1200);
+    e.preventDefault();
+    e.stopPropagation();
+    chrome.runtime.sendMessage({
+      type: "COPY_TO_CLIPBOARD",
+      text: pw,
+      autoClear: true,
+    } as Message);
+    copyBtn.replaceChildren();
+    copyBtn.appendChild(mkSvg(ICON_CHECK));
+    setTimeout(() => {
+      copyBtn.replaceChildren();
+      copyBtn.appendChild(mkSvg(ICON_COPY));
+    }, 1200);
     void keepAndMarkUsed();
   });
   inlineBtns.appendChild(regenBtn);
@@ -1278,12 +1405,19 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
   const useBtn = mk("button", "claspt-dd-gen-use-btn");
   useBtn.textContent = "Use this password ↵";
   useBtn.addEventListener("click", (e) => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     const pwFields = allFields.filter((f) => f.type === "password");
-    for (const pf of (pwFields.length > 0 ? pwFields : [{ element: input, type: "password" as const }])) {
+    for (const pf of pwFields.length > 0
+      ? pwFields
+      : [{ element: input, type: "password" as const }]) {
       setInputValue(pf.element, pw);
     }
-    chrome.runtime.sendMessage({ type: "COPY_TO_CLIPBOARD", text: pw, autoClear: true } as Message);
+    chrome.runtime.sendMessage({
+      type: "COPY_TO_CLIPBOARD",
+      text: pw,
+      autoClear: true,
+    } as Message);
     void keepAndMarkUsed();
     closeAllDropdowns();
     onClose();
@@ -1349,7 +1483,10 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
 
   /** Flush the pending save now and mark the entry as taken up. */
   async function keepAndMarkUsed() {
-    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
     const at = savedAt ?? (await recordGeneratedPassword(pw, location.hostname));
     if (at) {
       savedAt = at;
@@ -1357,7 +1494,13 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
     }
   }
 
-  function regen() { pw = gen(); pwText.textContent = pw; updateStr(pw); persist(); keepCurrent(); }
+  function regen() {
+    pw = gen();
+    pwText.textContent = pw;
+    updateStr(pw);
+    persist();
+    keepCurrent();
+  }
 
   // ── Password-mode panel (existing UI, now wrapped in a container so we
   //    can hide it when switching to Passphrase / PIN) ────────────────
@@ -1397,10 +1540,13 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
     cb.checked = !!prefs[key];
     cb.addEventListener("change", () => {
       // Don't allow turning every charset off.
-      const willBeAllOff = !cb.checked && !charsetBoxes
-        .filter((o) => o.key !== key)
-        .some((o) => !!prefs[o.key]);
-      if (willBeAllOff) { cb.checked = true; return; }
+      const willBeAllOff =
+        !cb.checked &&
+        !charsetBoxes.filter((o) => o.key !== key).some((o) => !!prefs[o.key]);
+      if (willBeAllOff) {
+        cb.checked = true;
+        return;
+      }
       (prefs as unknown as Record<string, unknown>)[key as string] = cb.checked;
       maxSymRow.style.display = prefs.symbols ? "" : "none";
       regen();
@@ -1568,7 +1714,9 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
     const pronounceable = prefs.memStyle === "pronounceable";
     memCountSlider.min = pronounceable ? "2" : "2";
     memCountSlider.max = pronounceable ? "8" : "6";
-    memCountSlider.value = String(pronounceable ? prefs.syllableCount : prefs.memWordCount);
+    memCountSlider.value = String(
+      pronounceable ? prefs.syllableCount : prefs.memWordCount,
+    );
     memCountLbl.textContent = pronounceable
       ? `Syllables: ${prefs.syllableCount}`
       : `Words: ${prefs.memWordCount}`;
@@ -1581,7 +1729,8 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
     const btn = memStyleBtns[style];
     btn.textContent = style === "pronounceable" ? "Pronounceable" : "Pattern";
     btn.addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       prefs.memStyle = style;
       syncMemorableControls();
       regen();
@@ -1618,28 +1767,104 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
   type Preset = { l: string; apply: () => void };
   const presetsByMode: Record<GenMode, Preset[]> = {
     password: [
-      { l: "Easy 12", apply: () => { prefs.length = 12; } },
-      { l: "Strong 20", apply: () => { prefs.length = 20; } },
-      { l: "Long 32", apply: () => { prefs.length = 32; } },
-      { l: "Memorable", apply: () => { prefs.length = 16; prefs.symbols = false; prefs.excludeAmbiguous = true; } },
+      {
+        l: "Easy 12",
+        apply: () => {
+          prefs.length = 12;
+        },
+      },
+      {
+        l: "Strong 20",
+        apply: () => {
+          prefs.length = 20;
+        },
+      },
+      {
+        l: "Long 32",
+        apply: () => {
+          prefs.length = 32;
+        },
+      },
+      {
+        l: "Memorable",
+        apply: () => {
+          prefs.length = 16;
+          prefs.symbols = false;
+          prefs.excludeAmbiguous = true;
+        },
+      },
     ],
     memorable: [
-      { l: "Short", apply: () => { prefs.memStyle = "pronounceable"; prefs.syllableCount = 3; } },
-      { l: "Standard", apply: () => { prefs.memStyle = "pronounceable"; prefs.syllableCount = 4; } },
-      { l: "Long", apply: () => { prefs.memStyle = "pronounceable"; prefs.syllableCount = 6; } },
-      { l: "Pattern", apply: () => { prefs.memStyle = "pattern"; prefs.memWordCount = 3; } },
+      {
+        l: "Short",
+        apply: () => {
+          prefs.memStyle = "pronounceable";
+          prefs.syllableCount = 3;
+        },
+      },
+      {
+        l: "Standard",
+        apply: () => {
+          prefs.memStyle = "pronounceable";
+          prefs.syllableCount = 4;
+        },
+      },
+      {
+        l: "Long",
+        apply: () => {
+          prefs.memStyle = "pronounceable";
+          prefs.syllableCount = 6;
+        },
+      },
+      {
+        l: "Pattern",
+        apply: () => {
+          prefs.memStyle = "pattern";
+          prefs.memWordCount = 3;
+        },
+      },
     ],
     // A v4 UUID has nothing to configure, so there is nothing to preset.
     uuid: [],
     passphrase: [
-      { l: "4 words", apply: () => { prefs.wordCount = 4; } },
-      { l: "5 words", apply: () => { prefs.wordCount = 5; } },
-      { l: "6 words", apply: () => { prefs.wordCount = 6; } },
+      {
+        l: "4 words",
+        apply: () => {
+          prefs.wordCount = 4;
+        },
+      },
+      {
+        l: "5 words",
+        apply: () => {
+          prefs.wordCount = 5;
+        },
+      },
+      {
+        l: "6 words",
+        apply: () => {
+          prefs.wordCount = 6;
+        },
+      },
     ],
     pin: [
-      { l: "PIN 4", apply: () => { prefs.pinLength = 4; } },
-      { l: "PIN 6", apply: () => { prefs.pinLength = 6; } },
-      { l: "PIN 8", apply: () => { prefs.pinLength = 8; } },
+      {
+        l: "PIN 4",
+        apply: () => {
+          prefs.pinLength = 4;
+        },
+      },
+      {
+        l: "PIN 6",
+        apply: () => {
+          prefs.pinLength = 6;
+        },
+      },
+      {
+        l: "PIN 8",
+        apply: () => {
+          prefs.pinLength = 8;
+        },
+      },
     ],
   };
 
@@ -1649,7 +1874,8 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
       const btn = mk("button", "claspt-dd-gen-preset");
       btn.textContent = p.l;
       btn.addEventListener("click", (e) => {
-        e.preventDefault(); e.stopPropagation();
+        e.preventDefault();
+        e.stopPropagation();
         p.apply();
         // Re-sync any visible controls so the slider/checkboxes match prefs.
         slider.value = String(prefs.length);
@@ -1674,8 +1900,12 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
     // Order matches build order: uppercase, lowercase, digits, symbols,
     // excludeAmbiguous, excludeProblematic.
     const order: Array<keyof InlineGenPrefs> = [
-      "uppercase", "lowercase", "digits", "symbols",
-      "excludeAmbiguous", "excludeProblematic",
+      "uppercase",
+      "lowercase",
+      "digits",
+      "symbols",
+      "excludeAmbiguous",
+      "excludeProblematic",
     ];
     order.forEach((key, i) => {
       if (cbs[i]) cbs[i].checked = !!prefs[key];
@@ -1708,7 +1938,9 @@ function createGeneratorSection(input: HTMLInputElement, allFields: DetectedFiel
     maxSymRow.style.display = prefs.symbols ? "" : "none";
     ambCb.checked = prefs.excludeAmbiguous;
     probCb.checked = prefs.excludeProblematic;
-    const checkboxes = optsGrid.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    const checkboxes = optsGrid.querySelectorAll<HTMLInputElement>(
+      'input[type="checkbox"]',
+    );
     checkboxes.forEach((cb, i) => {
       const key = charsetBoxes[i]?.key;
       if (key) cb.checked = !!prefs[key];
@@ -1739,7 +1971,10 @@ function mk(tag: string, cls?: string): HTMLElement {
 }
 
 function setInputValue(input: HTMLInputElement, value: string) {
-  const nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  const nativeSet = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
   if (nativeSet) nativeSet.call(input, value);
   else input.value = value;
   input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1747,7 +1982,14 @@ function setInputValue(input: HTMLInputElement, value: string) {
 }
 
 function closeAllDropdowns() {
+  activeHostGuard?.disconnect();
+  activeHostGuard = null;
+  activeHost = null;
+  openRowMenu?.remove();
+  openRowMenu = null;
   // Remove both the new shadow-DOM hosts and any legacy bare dropdowns
   // that other code paths may still create.
-  document.querySelectorAll(`.${HOST_CLASS}, .${DROPDOWN_CLASS}`).forEach((el) => el.remove());
+  document
+    .querySelectorAll(`.${HOST_CLASS}, .${DROPDOWN_CLASS}`)
+    .forEach((el) => el.remove());
 }

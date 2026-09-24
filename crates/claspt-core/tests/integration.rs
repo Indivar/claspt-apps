@@ -1,10 +1,13 @@
 // Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
-use claspt_core::crypto::{group_key, vault_key};
+#[cfg(feature = "pro")]
+use claspt_core::crypto::group_key;
+use claspt_core::crypto::vault_key;
 use claspt_core::pages::secret;
 #[cfg(feature = "pro")]
 use claspt_core::sync::encrypt::{self, WireBundleType};
+#[cfg(feature = "pro")]
 use std::fs;
 use tempfile::TempDir;
 

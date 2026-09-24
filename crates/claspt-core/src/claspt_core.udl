@@ -23,13 +23,13 @@ namespace claspt_core {
     // Stretch `password` with `salt` (≥16 bytes) into a 32-byte key. Deterministic
     // for a given (password, salt). Memory-hard — expect ~64 MiB, tens of ms.
     [Throws=CoreError]
-    bytes derive_key([ByRef] bytes password, [ByRef] bytes salt);
+    bytes derive_key(bytes password, [ByRef] bytes salt);
 
     // --- Crypto: Group key ---
     // Derive the 32-byte sync group key for (`password`, `vault_id`). Deterministic
     // and distinct from the master key; used only for sync-bundle encryption.
     [Throws=CoreError]
-    bytes derive_group_key([ByRef] bytes password, string vault_id);
+    bytes derive_group_key(bytes password, string vault_id);
 
     // --- Crypto: Vault key ---
     // Create a vault: generate a master key, wrap it under `password`, and write
@@ -60,10 +60,64 @@ namespace claspt_core {
     // chars). Store in config.json so recover_vault_key can reject wrong keys.
     string compute_master_key_verify([ByRef] bytes master_key);
 
+    // --- Crypto: key wrapping for restore ---
+    // One key wrapped under another (AES-256-GCM, magic as associated data).
+    [Throws=CoreError]
+    bytes wrap_key([ByRef] bytes kek, [ByRef] bytes key);
+
+    [Throws=CoreError]
+    bytes unwrap_key([ByRef] bytes kek, [ByRef] bytes wrapped);
+
+    // Write a known master key wrapped by `password` as a vault.key file.
+    [Throws=CoreError]
+    void write_vault_key([ByRef] bytes password, [ByRef] bytes master_key, string path);
+
+    // --- Crypto: device signing key ---
+    // A fresh Ed25519 key pair as PKCS#8 bytes, kept in the device keychain.
+    [Throws=CoreError]
+    bytes generate_device_key();
+
+    // The 32-byte public half, sent to the server at registration.
+    [Throws=CoreError]
+    bytes device_public_key([ByRef] bytes pkcs8);
+
+    // The 64-byte signature over a request message built the same way on
+    // every platform: method + path-with-query + body + device_id + timestamp + nonce.
+    [Throws=CoreError]
+    bytes sign_with_device_key([ByRef] bytes pkcs8, [ByRef] bytes message);
+
+    // HMAC-SHA256 keyed on the licence token, for the register and verify
+    // calls a device makes before the server knows its key.
+    bytes licence_hmac([ByRef] bytes license_token, [ByRef] bytes message);
+
+    // --- Crypto: sealed attachments ---
+    // True when `bytes` are a sealed attachment (start with the sealed magic).
+    boolean is_sealed_attachment([ByRef] bytes bytes);
+
+    // Seal attachment bytes under `master_key`. Same name and markdown reference
+    // as the plain file; only the bytes on disk change.
+    [Throws=CoreError]
+    bytes seal_attachment([ByRef] bytes master_key, [ByRef] bytes plaintext);
+
+    // Open a sealed attachment under `master_key`, returning the original bytes.
+    // Throws CryptoError on a wrong key, tampering, or a file that is not sealed.
+    [Throws=CoreError]
+    bytes open_attachment([ByRef] bytes master_key, [ByRef] bytes sealed);
+
+    // --- Crypto: one-time codes ---
+    // The RFC 6238 code for a base32 `secret_base32` at Unix time `now_secs`.
+    // `algorithm` is the otpauth:// name (SHA1, SHA256, SHA512; "" = SHA1),
+    // `digits` 6..8, `period` in seconds. The app never decodes the seed.
+    [Throws=CoreError]
+    string totp_code(string secret_base32, string algorithm, u32 digits, u32 period, u64 now_secs);
+
     // --- Sync: Bundle encryption ---
     // Encrypt a plaintext git `bundle` under the 32-byte `group_key` into a
-    // CSYNC1 envelope. `device_id` origin-stamps the header (first 8 bytes used;
-    // pass "" to omit). The header is authenticated, so origin cannot be spoofed.
+    // CSYNC1 envelope. `device_id` labels the header with the sender (first 8
+    // bytes used; pass "" to omit). The header is authenticated against
+    // tampering in transit, but every device in the group holds the key, so
+    // the label says which device wrote the bundle only as far as that device
+    // is honest; it is not proof of origin.
     [Throws=CoreError]
     bytes encrypt_sync_bundle([ByRef] bytes group_key, [ByRef] bytes bundle, BundleType bundle_type, string device_id);
 
@@ -185,6 +239,19 @@ dictionary ApplyResult {
     u32 commits_applied;
     boolean needs_merge;
     sequence<string> conflicts;
+    // Pages that changed on both sides and had to be chosen between; the
+    // newer `updated_at` was kept. Empty when nothing was chosen.
+    sequence<ResolvedPage> resolved;
+};
+
+// One choice a merge made: which version of a page was kept, and whether the
+// version this device had is the one replaced.
+dictionary ResolvedPage {
+    string path;
+    string title;
+    boolean mine_lost;
+    string kept_updated_at;
+    string lost_updated_at;
 };
 
 // Result of an auto-commit: the new commit OID (empty if nothing changed) and

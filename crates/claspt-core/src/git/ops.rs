@@ -24,6 +24,39 @@ pub struct CommitEntry {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Stage every change in the working tree, skipping nested git repositories.
+///
+/// A vault is an ordinary folder, so anything can end up inside one, including
+/// a checked-out repository. libgit2 will not add such a path to the index
+/// (it would have to become a submodule) and fails the entire staging call
+/// with `invalid path: '<dir>/'`. Left unhandled that ends version history
+/// from the moment the nested repository appears, and it aborts vault
+/// creation outright when the chosen folder already contains one.
+///
+/// Skipping those paths keeps every other change committable. The nested
+/// repository is left alone rather than absorbed, which is what the user
+/// meant by putting it there.
+pub fn stage_all(repo: &git2::Repository, index: &mut git2::Index) -> Result<(), git2::Error> {
+    let workdir = repo.workdir().map(Path::to_path_buf);
+    let mut skip_nested = |path: &Path, _matched: &[u8]| -> i32 {
+        match &workdir {
+            // Non-zero skips the path; zero adds it.
+            Some(root) if is_nested_repository(&root.join(path)) => 1,
+            _ => 0,
+        }
+    };
+    index.add_all(
+        ["*"].iter(),
+        git2::IndexAddOption::DEFAULT,
+        Some(&mut skip_nested),
+    )
+}
+
+/// Whether `path` is a directory holding its own git repository.
+fn is_nested_repository(path: &Path) -> bool {
+    path.is_dir() && path.join(".git").exists()
+}
+
 /// Commit all changes in the vault repository.
 ///
 /// Stages all modified/added/deleted files and creates a commit
@@ -33,7 +66,7 @@ pub fn commit_changes(vault_dir: &Path, title: &str) -> Result<Option<String>, G
 
     // Stage all changes
     let mut index = repo.index()?;
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+    stage_all(&repo, &mut index)?;
     // Also stage deletions
     index.update_all(["*"].iter(), None)?;
     index.write()?;
@@ -280,7 +313,7 @@ pub fn restore_file_to_commit(
 
     let repo = git2::Repository::open(vault_dir)?;
     let mut index = repo.index()?;
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+    stage_all(&repo, &mut index)?;
     index.update_all(["*"].iter(), None)?;
     index.write()?;
 
@@ -487,5 +520,42 @@ mod tests {
         assert!(log[0].message.starts_with("Restore:"));
         // Total commits: initial + v1 + v2 + restore = 4
         assert_eq!(log.len(), 4);
+    }
+
+    #[test]
+    fn a_nested_repository_inside_the_vault_does_not_stop_commits() {
+        // A vault is an ordinary folder, so a user can put a checked-out
+        // repository inside one. libgit2 refuses to add such a path to the
+        // index, and before this was handled it failed the whole staging call
+        // with `invalid path: '<dir>/'`, which silently ended version history
+        // from that moment on.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path();
+        git2::Repository::init(vault).unwrap();
+        std::fs::create_dir_all(vault.join("general")).unwrap();
+        std::fs::write(vault.join("general/note.md"), "hello").unwrap();
+
+        let nested = vault.join("someone-elses-project");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        std::fs::write(nested.join("README.md"), "not ours").unwrap();
+
+        let oid = commit_changes(vault, "note").expect("a nested repo must not fail the commit");
+        assert!(oid.is_some(), "the note should have been committed");
+
+        // The note is in the commit; the nested repository is not.
+        let repo = git2::Repository::open(vault).unwrap();
+        let tree = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(tree.get_path(Path::new("general/note.md")).is_ok());
+        assert!(
+            tree.get_path(Path::new("someone-elses-project")).is_err(),
+            "the nested repository must not be swallowed into the vault history"
+        );
     }
 }

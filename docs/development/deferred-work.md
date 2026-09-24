@@ -63,11 +63,12 @@ cryptographically bound to its label or page. An attacker with **filesystem writ
 access** could relocate an `enc:v1:` blob under a different label and it would
 still decrypt (no plaintext disclosure — integrity/confusion only).
 
-Binding `page_id + label` as AAD is the fix, but it changes the on-disk format
-and must ship as a versioned `enc:v2:` with a legacy-decrypt fallback, otherwise
-every existing secret — on desktop **and** the mobile app that shares this crate
-— becomes undecryptable. Tracked as a deliberate, backward-compatible migration.
-See the doc comment on `encrypt_block`.
+Binding `page_id + label` as associated data would close it, but only by
+changing the on-disk format for every existing secret on desktop **and** the
+mobile app that shares this crate. That migration was weighed and declined: it
+is an **accepted limitation**, not planned work. The reasons are in
+[ADR 0004](../adr/0004-secret-blocks-stay-enc-v1.md) and in the doc comment on
+`encrypt_block`.
 
 ## Deferred lint promotions
 
@@ -91,7 +92,7 @@ addressed.
 
 ## Remaining low-priority items (non-Pro, recorded so nothing is silently pending)
 
-These surfaced in the pre-open-source audit, are **not** in Pro/sync code, and
+These surfaced in a security review, are **not** in Pro/sync code, and
 were judged low enough value/risk to leave for a follow-up. None is a
 confidentiality bug or data-loss bug.
 
@@ -116,20 +117,10 @@ confidentiality bug or data-loss bug.
   save; the editor preview already masks it. A semantic change (treat EOF as an
   implicit close) is riskier than the edge it fixes.
 
-## Deferred product feature — in-app recycle bin
+## In-app recycle bin — built (September 2026)
 
-An in-app recycle bin (soft-delete pages into a vault-local trash, a restore /
-empty-trash view, and configurable auto-purge — e.g. 30 days) was considered and
-**deliberately deferred**. Deletion already has two recovery nets:
-
-- **Single-page delete** (`crud::delete_page`) sends the file to the **OS
-  trash / Recycle Bin** (recoverable there).
-- The vault is **git-tracked**, so any deleted page — including bulk deletes,
-  which skip the OS trash for speed — is recoverable from version history.
-
-Because that safety net already exists, the delete-from-search-results action
-routes through the OS trash rather than requiring a new subsystem. A full in-app
-bin would add a trash store, restore/empty-trash UI, a retention/auto-purge job
-(like the memory TTL cleanup), and a sync-interaction decision (does a trashed
-item sync or stay device-local?). Revisit if users ask for in-app restore or a
-retention policy they can configure.
+The recycle bin considered here was built on 20 September 2026 at the owner's
+request: `src-tauri/src/pages/trash.rs`, the Trash utility under Settings, the
+retention setting `trash_retention_days` (7 to 90 days, 30 to start) and an
+unlock-time purge. Every delete path goes through it; the OS trash is no
+longer used. See `docs/quickstarts/trash.md`.

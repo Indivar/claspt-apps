@@ -392,7 +392,6 @@ pub fn upsert_memory(
 
     // Encrypt secret blocks in content
     let clean = strip_review_markers(write.content);
-    let encrypted_content = secret::encrypt_secrets(&clean, master_key)?;
 
     let tags = write.tags.to_vec();
     let namespace_owned = namespace.to_string();
@@ -425,6 +424,10 @@ pub fn upsert_memory(
 
     // Check if a page with this title already exists
     if let Some(existing) = find_memory_by_title(vault_dir, namespace, write.title)? {
+        // Stored the way the page is stored: a memory the user has switched
+        // to full-body encryption stays that way.
+        let encrypted_content =
+            secret::encrypt_for_page(existing.meta.encrypted, &clean, master_key)?;
         let mut page =
             crud::update_page_with_meta(vault_dir, &existing.path, &encrypted_content, apply)?;
         page.content = clean.clone();
@@ -437,6 +440,7 @@ pub fn upsert_memory(
         }
 
         // Create new page, then update metadata
+        let encrypted_content = secret::encrypt_secrets(&clean, master_key)?;
         let page = crud::create_page(vault_dir, write.title, &folder, &encrypted_content, false)?;
         let mut page =
             crud::update_page_with_meta(vault_dir, &page.path, &encrypted_content, apply)?;
@@ -713,7 +717,7 @@ pub fn overview(vault_dir: &Path) -> Result<Vec<NamespaceOverview>, PageError> {
                 }
             })
             .collect();
-        pages.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        pages.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
         out.push(NamespaceOverview { namespace, pages });
     }
     Ok(out)
@@ -797,7 +801,7 @@ pub fn list_memories(
     }
 
     // Sort by updated_at descending
-    memories.sort_by(|a, b| b.meta.updated_at.cmp(&a.meta.updated_at));
+    memories.sort_by_key(|m| std::cmp::Reverse(m.meta.updated_at));
 
     Ok(memories)
 }
@@ -821,7 +825,7 @@ pub fn delete_memory(vault_dir: &Path, namespace: &str, title: &str) -> Result<(
             "Memory '{title}' not found in namespace '{namespace}'"
         ))
     })?;
-    crud::delete_page(vault_dir, &existing.path)
+    crud::delete_page(vault_dir, &existing.path).map(|_| ())
 }
 
 /// Append `text` to the end of a memory page, creating the page when it does
@@ -870,11 +874,24 @@ pub fn append_memory(
             "Memory '{title}' ends inside an unclosed :::secret block; repair it before appending"
         )));
     }
-    let mut combined = current.content;
-    if !combined.is_empty() && !combined.ends_with('\n') {
-        combined.push('\n');
-    }
-    combined.push_str(&secret::encrypt_secrets(text, master_key)?);
+    // A block page keeps its existing ciphertext untouched and gains the new
+    // text with its own blocks sealed. A full-body page is one sealed value;
+    // appending to that is opening it, adding the text, and sealing it again.
+    let combined = if current.meta.encrypted {
+        let mut plain = secret::decrypt_full_body(&current.content, master_key)?;
+        if !plain.is_empty() && !plain.ends_with('\n') {
+            plain.push('\n');
+        }
+        plain.push_str(text);
+        secret::encrypt_full_body(&plain, master_key)?
+    } else {
+        let mut combined = current.content;
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&secret::encrypt_secrets(text, master_key)?);
+        combined
+    };
     crud::update_page_with_meta(vault_dir, &existing.path, &combined, |meta| {
         stamp(meta, writer)
     })
@@ -934,7 +951,9 @@ pub fn cleanup_expired(vault_dir: &Path, retention: &KindRetention) -> Result<us
                         .updated_at
                         .checked_add_signed(chrono::Duration::hours(hours));
                     if let Some(expires_at) = expires_at {
-                        if now > expires_at && crud::delete_page(vault_dir, &summary.path).is_ok() {
+                        if now > expires_at
+                            && crud::remove_page_permanently(vault_dir, &summary.path).is_ok()
+                        {
                             deleted += 1;
                             log::info!(
                                 "Cleaned up expired memory: {} (ttl={}h)",
@@ -1849,5 +1868,47 @@ mod tests {
         let bot = &all[1].pages[0];
         assert!(!bot.reviewed);
         assert_eq!(bot.written_by_name.as_deref(), Some("Bot"));
+    }
+
+    #[test]
+    fn upsert_and_append_keep_a_full_body_page_sealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let key = [5u8; 32];
+        std::fs::create_dir_all(vault.join("general")).unwrap();
+        let ns = "proj";
+        let write = MemoryWrite::new("decisions", "first line");
+        let page = upsert_memory(vault, ns, &write, &key, None).unwrap();
+
+        // The user seals the whole page from the app.
+        let sealed = secret::encrypt_full_body(&page.content, &key).unwrap();
+        crud::update_page_with_meta(vault, &page.path, &sealed, |meta| meta.encrypted = true)
+            .unwrap();
+
+        let write = MemoryWrite::new("decisions", "replaced body\n\n:::secret[k]\nv: 1\n:::");
+        upsert_memory(vault, ns, &write, &key, None).unwrap();
+        let on_disk = crud::read_page(vault, &page.path).unwrap();
+        assert!(
+            on_disk.meta.encrypted,
+            "the flag must survive an agent write"
+        );
+        assert!(
+            !on_disk.content.contains("replaced body"),
+            "prose reached disk in plaintext"
+        );
+        assert_eq!(
+            secret::decrypt_for_page(true, &on_disk.content, &key)
+                .unwrap()
+                .trim_end(),
+            "replaced body\n\n:::secret[k]\nv: 1\n:::"
+        );
+
+        append_memory(vault, ns, "decisions", "appended", &key, None).unwrap();
+        let on_disk = crud::read_page(vault, &page.path).unwrap();
+        assert!(on_disk.meta.encrypted);
+        assert!(!on_disk.content.contains("appended"));
+        assert!(secret::decrypt_for_page(true, &on_disk.content, &key)
+            .unwrap()
+            .ends_with("appended"));
     }
 }

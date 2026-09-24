@@ -3,7 +3,9 @@
 Generated from the server by `node scripts/gen-mcp-reference.mjs`; do not edit by hand.
 
 Server: `claspt`, protocol 2025-06-18 (also 2025-03-26 and 2024-11-05).
-Start it with `claspt --mcp`; `claspt mcp install <client>` writes the client configuration. `CLASPT_API_TOKEN` names the client; the token's scope (Notes or Secrets) and namespaces decide what the tools may do.
+Start it with `claspt --mcp`; `claspt mcp install <client...>` writes the client configuration. `CLASPT_API_TOKEN` names the client; the token's scope (Notes or Secrets) and namespaces decide what the tools may do.
+
+The token is registered in the vault the app has open (or `CLASPT_VAULT_DIR`, or `--vault`). By default every AI tool on a machine shares one token: `claspt mcp install claude-code claude-desktop --secrets` issues it once, writes it into each named client and refreshes every other config that carried the previous shared token or a token the vault no longer knows. `--separate` gives the named clients a token of their own; `--project` always does. `claspt mcp doctor` lists every config on the machine with its token hint and whether the open vault and the running app accept it. At start the server prints one line saying whether its token is accepted, and every refusal names the token by its hint.
 
 ## Tools
 

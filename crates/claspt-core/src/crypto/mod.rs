@@ -7,7 +7,12 @@
 //! material flows through `zeroize::Zeroizing` wrappers so it is scrubbed from
 //! memory on drop, and every symmetric encryption uses a fresh CSPRNG nonce.
 pub mod aead;
+pub mod attachment;
+pub mod compare;
+pub mod device_key;
 pub mod error;
 pub mod group_key;
 pub mod kdf;
+pub mod key_wrap;
+pub mod totp;
 pub mod vault_key;

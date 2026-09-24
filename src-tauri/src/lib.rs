@@ -25,6 +25,7 @@
 //!   HTTP API for the browser extension, and internal app-state stores.
 
 pub mod agent_namespace;
+mod api_response;
 mod biometric;
 pub mod cli;
 mod commands;
@@ -60,19 +61,22 @@ mod vault;
 pub mod webauthn;
 
 use commands::api::{
-    approve_secret_access, begin_extension_pairing, cancel_extension_pairing, create_api_client,
-    extension_pairing_status, get_exe_path, list_api_clients, list_approval_grants,
-    local_api_status, memory_overview, read_access_log, revoke_api_client, revoke_approval_grant,
-    ssh_agent_status, start_local_api, start_ssh_agent, stop_local_api, stop_ssh_agent,
+    approve_secret_access, begin_extension_pairing, cancel_extension_pairing, connect_ai_tool,
+    create_api_client, extension_pairing_status, get_exe_path, list_api_clients,
+    list_approval_grants, local_api_status, memory_overview, read_access_log, revoke_api_client,
+    revoke_approval_grant, ssh_agent_status, start_local_api, start_ssh_agent, stop_local_api,
+    stop_ssh_agent,
 };
 use commands::biometric::{
     biometric_available, biometric_disable, biometric_enroll, biometric_enrolled, biometric_status,
     biometric_unlock, biometric_verify,
 };
 use commands::crypto::{
-    create_vault, decrypt_block, encrypt_block, get_vault_config, key_lock_vault, lock_vault,
-    recover_with_key, reset_to_defaults, set_vault_config, suggest_default_vault_dir,
-    touch_activity, unlock_vault, vault_exists_at, verify_password, VaultState,
+    change_master_password, create_vault, decrypt_block, encrypt_block, get_vault_config,
+    inspect_vault_dir, key_lock_vault, lock_vault, print_window, recover_with_key,
+    recovery_key_filename, reset_to_defaults, save_recovery_key, set_vault_config,
+    suggest_default_vault_dir, touch_activity, unlock_vault, vault_exists_at, verify_password,
+    VaultState,
 };
 use commands::export::{export_secrets_only, export_vault_complete, import_from_zip};
 use commands::generator::{
@@ -98,11 +102,15 @@ use commands::internal::{
 };
 use commands::pages::{
     create_folder, create_page, delete_folder, delete_media, delete_page, delete_pages_bulk,
-    duplicate_page, list_folders, list_pages, list_secrets, list_tags, move_page,
-    preview_image_transform, process_and_save_media, read_media_data_url, read_page, rename_folder,
-    resolve_media_path, save_media, save_media_from_path, set_memory_reviewed, toggle_archive,
-    toggle_encryption, toggle_pin, update_page, update_tags, update_title,
+    duplicate_page, export_media, list_folders, list_pages, list_secrets, list_tags,
+    media_references, media_usage, move_page, preview_image_transform,
+    preview_image_transform_bytes, process_and_save_media, process_and_save_media_bytes,
+    read_media_data_url, read_page, rename_folder, resolve_media_path, save_media,
+    save_media_from_path, set_media_sealed, set_memory_reviewed, stat_source_file, toggle_archive,
+    toggle_encryption, toggle_pin, trash_empty, trash_list, trash_purge, trash_restore,
+    update_page, update_tags, update_title,
 };
+use commands::passkeys::{delete_passkey, list_passkeys};
 use commands::search::{rebuild_search_index, search_pages, SearchState};
 use commands::sync::{SyncState, SyncV2Managed};
 use commands::utilities::{
@@ -195,6 +203,8 @@ fn clear_webview2_crash_marker() {
 macro_rules! invoke_handlers {
     ($($pro:ident),* $(,)?) => {
         tauri::generate_handler![
+            list_passkeys,
+            delete_passkey,
             create_vault,
             unlock_vault,
             lock_vault,
@@ -202,11 +212,16 @@ macro_rules! invoke_handlers {
             touch_activity,
             verify_password,
             recover_with_key,
+            change_master_password,
+            recovery_key_filename,
+            save_recovery_key,
+            print_window,
             get_vault_config,
             set_vault_config,
             reset_to_defaults,
             suggest_default_vault_dir,
             vault_exists_at,
+            inspect_vault_dir,
             encrypt_block,
             decrypt_block,
             create_page,
@@ -214,6 +229,10 @@ macro_rules! invoke_handlers {
             update_page,
             delete_page,
             delete_pages_bulk,
+            trash_list,
+            trash_restore,
+            trash_purge,
+            trash_empty,
             duplicate_page,
             toggle_pin,
             toggle_archive,
@@ -235,7 +254,14 @@ macro_rules! invoke_handlers {
             resolve_media_path,
             read_media_data_url,
             preview_image_transform,
+            preview_image_transform_bytes,
             process_and_save_media,
+            process_and_save_media_bytes,
+            set_media_sealed,
+            media_references,
+            media_usage,
+            stat_source_file,
+            export_media,
             search_pages,
             rebuild_search_index,
             git_commit,
@@ -274,6 +300,7 @@ macro_rules! invoke_handlers {
             approve_secret_access,
             local_api_status,
             get_exe_path,
+            connect_ai_tool,
             generate_password,
             generate_passphrase,
             generate_memorable,
@@ -398,6 +425,11 @@ pub fn run() {
                     .level_for("tantivy", log::LevelFilter::Warn)
                     .level_for("tantivy::indexer", log::LevelFilter::Warn)
                     .level_for("tantivy::directory", log::LevelFilter::Warn)
+                    // Support needs more than the last few hours. The default
+                    // is one 40 KB file that rotated away yesterday's evidence
+                    // by breakfast; five dated files of 2 MB keep about a week.
+                    .max_file_size(2_000_000)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
                     .target(tauri_plugin_log::Target::new(
                         tauri_plugin_log::TargetKind::LogDir {
                             file_name: Some("claspt.log".into()),
@@ -458,7 +490,16 @@ pub fn run() {
             // Auto-start local API on app launch if enabled in config.
             // Reads config from default vault dir — server stays up across lock/unlock cycles.
             {
-                let vault_dir = std::path::PathBuf::from(suggest_default_vault_dir());
+                // The last vault opened, when there is one, because a person
+                // who keeps their vault outside the default directory would
+                // otherwise have the default vault's settings answer for it.
+                use tauri::Manager;
+                let vault_dir = app
+                    .path()
+                    .app_config_dir()
+                    .ok()
+                    .and_then(|dir| vault::last_opened::recall(&dir))
+                    .unwrap_or_else(|| std::path::PathBuf::from(suggest_default_vault_dir()));
                 let config_path = vault_dir.join(".securenotes").join("config.json");
                 if config_path.exists() {
                     if let Ok(cfg) = vault::init::read_config(&vault_dir) {

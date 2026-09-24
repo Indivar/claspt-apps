@@ -1,6 +1,10 @@
 // Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
+import { getRegistrableDomain } from "./url-matching";
+// Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
+// Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
+
 /**
  * passkey-codec — the translations between what a page passes to
  * `navigator.credentials`, what crosses the page/extension boundary as
@@ -219,4 +223,53 @@ export interface BridgeReply {
   outcome: "done" | "fallback" | "error";
   result?: RegistrationResult | AssertionResult;
   error?: string;
+}
+
+/**
+ * Whether a relying-party id may be used from a page on `hostname`.
+ *
+ * This is the WebAuthn rule, applied by us because the page cannot be trusted
+ * to apply it: the RP ID must equal the page's host or be a registrable-domain
+ * suffix of it. "login.github.com" may use "github.com"; "user.github.io" may
+ * not use "github.io", because that is a public suffix shared by strangers;
+ * and "evil-github.com" may not use "github.com" at all.
+ *
+ * Both the content script and the worker call this. The page-world request
+ * used to be forwarded as sent, so any site could ask the vault to sign for
+ * any other site and relay the answer, which is the one attack passkeys exist
+ * to stop.
+ */
+export function rpIdAllowedForHost(hostname: string, rpId: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  const rp = rpId.toLowerCase().replace(/\.$/, "");
+  if (!host || !rp) return false;
+  if (host === rp) return true;
+  if (!host.endsWith("." + rp)) return false;
+  // A suffix of the host is only acceptable if it still contains the host's
+  // registrable domain: that is what rules out public suffixes.
+  const registrable = getRegistrableDomain(host);
+  return rp === registrable || rp.endsWith("." + registrable);
+}
+
+/**
+ * The origin a passkey request is really coming from, or null if the URL is
+ * not one a passkey may be used on.
+ *
+ * WebAuthn needs a secure context. Browsers treat https and the loopback
+ * hosts as secure and nothing else, so the same set is accepted here. The
+ * origin is computed, never read from the request, because the request came
+ * from the page.
+ */
+export function passkeyOriginFrom(url: string | undefined): string | null {
+  if (!url) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback))
+    return null;
+  return parsed.origin;
 }

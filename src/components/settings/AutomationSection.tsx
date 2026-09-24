@@ -593,8 +593,8 @@ export function AutomationSection() {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-[11px] text-text-muted">
-                  Secret block templates — built-in and custom. Used when creating new
-                  secret blocks.
+                  Your own secret templates. They join the editor&apos;s picker
+                  (Cmd+Shift+S) after the built-in ones and sync with the vault.
                 </p>
                 <button
                   onClick={() => setShowAddTemplate(!showAddTemplate)}

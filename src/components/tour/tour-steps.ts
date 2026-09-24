@@ -17,6 +17,12 @@ export interface TourStep {
   prepare?: () => void;
   /** Optional cleanup when leaving this step (close panels, dialogs, etc.) */
   cleanup?: () => void;
+  /**
+   * Needs a licence. Shown only to someone who has one: a tour is a promise
+   * that what it points at is there, and walking a free user through sharing
+   * teaches them a feature they cannot use.
+   */
+  pro?: boolean;
 }
 
 export const CURRENT_TOUR_VERSION = 1;
@@ -73,7 +79,11 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: "generator",
     tier: "quick",
-    target: '[data-tour="generator"]',
+    // The dialog, not the button that opens it. `prepare` opens the generator,
+    // which then covers the sidebar — so the spotlight cut a hole over a button
+    // that was now behind a modal backdrop, and the hole showed as an empty
+    // black square.
+    target: '[data-tour="generator-dialog"]',
     title: "Password Generator",
     description:
       "6 modes: passwords, passphrases, memorable, PIN, UUID. With strength checker and crack-time estimates.",
@@ -131,6 +141,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: "sharing",
     tier: "advanced",
+    pro: true,
     target: '[data-tour="sharing"]',
     title: "Sharing",
     description:
@@ -215,14 +226,34 @@ export const TOUR_STEPS: TourStep[] = [
   },
 ];
 
-export function getQuickSteps(): TourStep[] {
-  return TOUR_STEPS.filter((s) => s.tier === "quick");
+/**
+ * Steps this person can actually follow.
+ *
+ * A tour is a promise that what it points at is there. Walking a free user
+ * through sharing — as it did — teaches a feature they cannot use and points
+ * at a control they may not have.
+ */
+function forPlan(steps: TourStep[], hasPro: boolean): TourStep[] {
+  return hasPro ? steps : steps.filter((s) => !s.pro);
 }
 
-export function getAdvancedSteps(): TourStep[] {
-  return TOUR_STEPS.filter((s) => s.tier === "advanced");
+export function getQuickSteps(hasPro = true): TourStep[] {
+  return forPlan(
+    TOUR_STEPS.filter((s) => s.tier === "quick"),
+    hasPro,
+  );
 }
 
-export function getNewSteps(lastSeenVersion: number): TourStep[] {
-  return TOUR_STEPS.filter((s) => s.version > lastSeenVersion);
+export function getAdvancedSteps(hasPro = true): TourStep[] {
+  return forPlan(
+    TOUR_STEPS.filter((s) => s.tier === "advanced"),
+    hasPro,
+  );
+}
+
+export function getNewSteps(lastSeenVersion: number, hasPro = true): TourStep[] {
+  return forPlan(
+    TOUR_STEPS.filter((s) => s.version > lastSeenVersion),
+    hasPro,
+  );
 }

@@ -90,6 +90,8 @@ interface PagesStore {
 
   // Bulk operations
   bulkDelete: () => Promise<void>;
+  /** Put a trashed page back and open it. */
+  restoreFromTrash: (entryId: string) => Promise<boolean>;
   bulkMove: (folder: string) => Promise<void>;
   bulkArchive: () => Promise<void>;
   bulkPin: () => Promise<void>;
@@ -239,13 +241,24 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
 
   deletePage: async (path) => {
     try {
-      await cmd.deletePage(path);
+      const entry = await cmd.deletePage(path);
       const { activePage } = get();
       if (activePage?.path === path) {
         set({ activePage: null });
       }
       await get().loadPages();
       schedulePushAfterSave();
+      // Nothing is gone yet: the page waits in the trash, and this is the
+      // moment an undo is wanted.
+      toast("Moved to Trash", {
+        description: `"${entry.title}" can be restored from Settings › Utilities › Trash until ${new Date(entry.purge_at).toLocaleDateString()}.`,
+        action: {
+          label: "Undo",
+          onClick: () => {
+            void get().restoreFromTrash(entry.id);
+          },
+        },
+      });
       return true;
     } catch (e) {
       // Surface the failure directly — the editor's error banner only shows
@@ -350,10 +363,29 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
 
   // ── Bulk Operations ──
 
+  restoreFromTrash: async (entryId) => {
+    try {
+      const page = await cmd.trashRestore(entryId);
+      await get().loadPages();
+      await get().loadFolders();
+      schedulePushAfterSave();
+      toast.success(`Restored "${page.meta.title}"`);
+      return true;
+    } catch (e) {
+      const msg = errorMessage(e);
+      set({ error: msg });
+      toast.error(`Couldn't restore page: ${msg}`);
+      return false;
+    }
+  },
+
   bulkDelete: async () => {
     const { selectedPaths, activePage } = get();
     try {
-      await cmd.deletePagesBulk([...selectedPaths]);
+      const count = await cmd.deletePagesBulk([...selectedPaths]);
+      toast(`${count} ${count === 1 ? "page" : "pages"} moved to Trash`, {
+        description: "Restore from Settings › Utilities › Trash.",
+      });
     } catch (e) {
       set({ error: errorMessage(e) });
     }

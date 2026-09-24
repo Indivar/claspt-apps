@@ -7,10 +7,58 @@
  * ARIA attributes, placeholder text, labels, and proximity heuristics.
  */
 
+/**
+ * The personal-detail fields an identity can fill.
+ *
+ * Named after the HTML `autocomplete` tokens they mostly come from, because a
+ * site that bothers to set `autocomplete` is telling us exactly what the field
+ * is and that is worth more than any guess we could make from its name.
+ */
+export type IdentityFieldType =
+  | "full_name"
+  | "first_name"
+  | "last_name"
+  | "phone"
+  | "street_1"
+  | "street_2"
+  | "city"
+  | "state"
+  | "postal_code"
+  | "country"
+  | "organization";
+
 export interface DetectedField {
   element: HTMLInputElement;
-  type: "username" | "password" | "email" | "otp" | "card_number" | "card_expiry" | "card_cvv" | "card_name";
+  type:
+    | "username"
+    | "password"
+    | "email"
+    | "otp"
+    | "card_number"
+    | "card_expiry"
+    | "card_cvv"
+    | "card_name"
+    | IdentityFieldType;
 }
+
+/** Whether a detected field belongs to an identity rather than a login or card. */
+export function isIdentityField(type: DetectedField["type"]): type is IdentityFieldType {
+  return IDENTITY_FIELD_TYPES.includes(type as IdentityFieldType);
+}
+
+const IDENTITY_FIELD_TYPES: IdentityFieldType[] = [
+  "full_name",
+  "first_name",
+  "last_name",
+  "phone",
+  "street_1",
+  "street_2",
+  "city",
+  "state",
+  "postal_code",
+  "country",
+  "organization",
+];
 
 // ── Selectors ───────────────────────────────────
 
@@ -118,6 +166,167 @@ const CARD_NAME_SELECTORS = [
   'input[placeholder*="name on card" i]',
 ];
 
+// ── Identity / address field selectors ──
+//
+// `autocomplete` first in every list: a site that sets it has told us what the
+// field is, and no heuristic beats being told. The name/id fallbacks cover the
+// large number of forms that never set it.
+
+const IDENTITY_SELECTORS: Array<[IdentityFieldType, string[]]> = [
+  [
+    "full_name",
+    [
+      'input[autocomplete="name"]',
+      'input[name="name" i]',
+      'input[name="fullname" i]',
+      'input[name="full_name" i]',
+      'input[id="fullname" i]',
+      'input[placeholder*="full name" i]',
+    ],
+  ],
+  [
+    "first_name",
+    [
+      'input[autocomplete="given-name"]',
+      'input[name="firstname" i]',
+      'input[name="first_name" i]',
+      'input[name="fname" i]',
+      'input[name="given-name" i]',
+      'input[id="firstname" i]',
+      'input[placeholder*="first name" i]',
+    ],
+  ],
+  [
+    "last_name",
+    [
+      'input[autocomplete="family-name"]',
+      'input[name="lastname" i]',
+      'input[name="last_name" i]',
+      'input[name="lname" i]',
+      'input[name="surname" i]',
+      'input[name="family-name" i]',
+      'input[id="lastname" i]',
+      'input[placeholder*="last name" i]',
+      'input[placeholder*="surname" i]',
+    ],
+  ],
+  [
+    "phone",
+    [
+      'input[autocomplete="tel"]',
+      'input[autocomplete="tel-national"]',
+      'input[type="tel"]',
+      'input[name="phone" i]',
+      'input[name="telephone" i]',
+      'input[name="mobile" i]',
+      'input[id="phone" i]',
+      'input[placeholder*="phone" i]',
+    ],
+  ],
+  [
+    "street_1",
+    [
+      'input[autocomplete="street-address"]',
+      'input[autocomplete="address-line1"]',
+      'input[name="address" i]',
+      'input[name="address1" i]',
+      'input[name="address_line1" i]',
+      'input[name="street" i]',
+      'input[id="address1" i]',
+      'input[placeholder*="street address" i]',
+      'input[placeholder*="address line 1" i]',
+    ],
+  ],
+  [
+    "street_2",
+    [
+      'input[autocomplete="address-line2"]',
+      'input[name="address2" i]',
+      'input[name="address_line2" i]',
+      'input[id="address2" i]',
+      'input[placeholder*="apartment" i]',
+      'input[placeholder*="address line 2" i]',
+    ],
+  ],
+  [
+    "city",
+    [
+      'input[autocomplete="address-level2"]',
+      'input[name="city" i]',
+      'input[name="town" i]',
+      'input[name="suburb" i]',
+      'input[id="city" i]',
+      'input[placeholder*="city" i]',
+    ],
+  ],
+  [
+    "state",
+    [
+      'input[autocomplete="address-level1"]',
+      'input[name="state" i]',
+      'input[name="province" i]',
+      'input[name="region" i]',
+      'input[name="county" i]',
+      'input[id="state" i]',
+    ],
+  ],
+  [
+    "postal_code",
+    [
+      'input[autocomplete="postal-code"]',
+      'input[name="zip" i]',
+      'input[name="zipcode" i]',
+      'input[name="postcode" i]',
+      'input[name="postal_code" i]',
+      'input[id="zip" i]',
+      'input[placeholder*="post code" i]',
+      'input[placeholder*="postcode" i]',
+      'input[placeholder*="zip" i]',
+    ],
+  ],
+  [
+    "country",
+    [
+      'input[autocomplete="country"]',
+      'input[autocomplete="country-name"]',
+      'input[name="country" i]',
+      'input[id="country" i]',
+    ],
+  ],
+  [
+    "organization",
+    [
+      'input[autocomplete="organization"]',
+      'input[name="company" i]',
+      'input[name="organization" i]',
+      'input[name="organisation" i]',
+      'input[placeholder*="company" i]',
+    ],
+  ],
+];
+
+/**
+ * Heuristic fallbacks, in the order they are tried.
+ *
+ * Order matters and is not alphabetical. `first_name` and `last_name` are
+ * tested before `full_name`, because "first name" contains "name" and a form
+ * with separate name boxes must not have both of them filled with the whole
+ * name. `street_2` before `street_1` for the same reason.
+ */
+const IDENTITY_PATTERNS: Array<[IdentityFieldType, RegExp]> = [
+  ["first_name", /first.?name|given.?name|forename|\bfname\b/i],
+  ["last_name", /last.?name|family.?name|surname|\blname\b/i],
+  ["street_2", /address.?(?:line.?)?2|apt|apartment|suite|unit\b/i],
+  ["street_1", /street|address.?(?:line.?)?1|\baddress\b|addr\b/i],
+  ["postal_code", /post.?code|postal|\bzip\b/i],
+  ["city", /\bcity\b|\btown\b|suburb|address.?level.?2/i],
+  ["state", /\bstate\b|province|\bregion\b|\bcounty\b|address.?level.?1/i],
+  ["country", /\bcountry\b/i],
+  ["phone", /\bphone\b|telephone|\bmobile\b|\btel\b/i],
+  ["organization", /\bcompany\b|organi[sz]ation|\bemployer\b/i],
+  ["full_name", /full.?name|\byour name\b|\bname\b/i],
+];
+
 // ── Heuristic patterns (checked against name, id, placeholder, aria-label) ──
 
 const USERNAME_PATTERNS = /user(?:name|id|_name)?|login|signin|account|identifier/i;
@@ -198,6 +407,15 @@ export function detectFields(): DetectedField[] {
     document.querySelectorAll<HTMLInputElement>(sel).forEach((el) => addField(el, "card_name"));
   }
 
+  // Identity/address fields, last among the selectors: `addField` is
+  // first-wins, so a field a login or card selector already claimed keeps that
+  // meaning. "Name on card" is a card field, not a person's name.
+  for (const [type, selectors] of IDENTITY_SELECTORS) {
+    for (const sel of selectors) {
+      document.querySelectorAll<HTMLInputElement>(sel).forEach((el) => addField(el, type));
+    }
+  }
+
   // ── Phase 2: Heuristic detection on unmatched text inputs ──
   // Search all text/tel/number inputs that weren't caught by selectors
 
@@ -218,6 +436,11 @@ export function detectFields(): DetectedField[] {
       addField(el, "email");
     } else if (USERNAME_PATTERNS.test(combinedText)) {
       addField(el, "username");
+    } else {
+      // Identity patterns are ordered, and the first match wins: see the
+      // comment on IDENTITY_PATTERNS for why that order is not alphabetical.
+      const identity = IDENTITY_PATTERNS.find(([, pattern]) => pattern.test(combinedText));
+      if (identity) addField(el, identity[0]);
     }
   }
 

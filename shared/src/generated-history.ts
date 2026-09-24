@@ -75,8 +75,18 @@ export interface StoredGeneratedEntry extends GeneratedEntry {
 }
 
 const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
 ];
 
 /** Page title for the month a timestamp falls in: "Generated passwords — September 2026". */
@@ -171,8 +181,8 @@ export function monthPageIntro(when: Date): string {
     "browser extension. Claspt writes this page automatically.",
     "",
     "`used: yes` means the password was copied or filled into a site. The rest",
-    "were generated and not taken up, and are the ones the \"Clear unused",
-    "passwords\" button removes.",
+    'were generated and not taken up, and are the ones the "Clear unused',
+    'passwords" button removes.',
     "",
     "Each password is encrypted. The labels, dates and site names are not, so",
     "the page stays searchable.",
@@ -244,7 +254,10 @@ export function renderHistoryBlock(entry: GeneratedEntry, when: Date): string {
 // neither exposes a block-level patch to its UI layer — so the operations live
 // here rather than once per app.
 
-function blockRange(content: string, label: string): { start: number; end: number } | null {
+function blockRange(
+  content: string,
+  label: string,
+): { start: number; end: number } | null {
   const lines = content.split("\n");
   const blocks = extractSecretBlocks(content);
   if (!blocks.some((b) => b.label === label)) return null;
@@ -267,7 +280,12 @@ function blockRange(content: string, label: string): { start: number; end: numbe
  * Exported for tests: this and {@link removeBlock} rewrite page markdown in
  * place, so a mistake here silently corrupts a vault page rather than throwing.
  */
-export function setFieldInBlock(content: string, label: string, key: string, value: string): string {
+export function setFieldInBlock(
+  content: string,
+  label: string,
+  key: string,
+  value: string,
+): string {
   const range = blockRange(content, label);
   if (!range) return content;
 

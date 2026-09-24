@@ -354,7 +354,7 @@
   .claspt-dd-row-menu { background: #1c2128; border-color: #2d333b; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
 }
 .claspt-dd-row-menu-item {
-  display: block; width: 100%; text-align: left;
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
   background: none; border: none; cursor: pointer;
   padding: 6px 10px; font-size: 12px; color: #1a1d21;
   border-radius: 5px;
@@ -362,11 +362,16 @@
 .claspt-dd-row-menu-item:hover { background: #f3f0e8; }
 .claspt-dd-row-menu-item.is-danger { color: #dc2626; }
 .claspt-dd-row-menu-item.is-danger:hover { background: #fef2f2; }
+.claspt-dd-row-menu-item svg { flex-shrink: 0; opacity: 0.75; }
+.claspt-dd-row-menu-sep { height: 1px; margin: 4px 6px; background: #e5e7eb; }
+.claspt-dd-row-used { font-size: 10px; color: #8b949e; margin-top: 1px; }
+.claspt-dd-fly-version { font-size: 9.5px; color: #8b949e; margin-left: 4px; }
 @media (prefers-color-scheme: dark) {
   .claspt-dd-row-menu-item { color: #e6edf3; }
   .claspt-dd-row-menu-item:hover { background: #d4930a18; }
   .claspt-dd-row-menu-item.is-danger { color: #ef4444; }
   .claspt-dd-row-menu-item.is-danger:hover { background: #ef444418; }
+  .claspt-dd-row-menu-sep { background: #2d333b; }
 }
 
 /* Single-line credential row */
@@ -387,8 +392,8 @@
  *
  * These used to sit side by side on one line, both with
  * `white-space: nowrap` and an ellipsis, inside a 380px dropdown. With a
- * credential named "google - varinder@example.com" and an address to match,
- * that cut BOTH of them — the row read "google - varinder@in… · varinder@indi…"
+ * credential named "google - alice@example.com" and an address to match,
+ * that cut BOTH of them — the row read "google - alice@ex… · alice@exam…"
  * and told the user nothing they could act on. A truncated identifier is worse
  * than no identifier, because it looks like information. */
 .claspt-dd-row-info {

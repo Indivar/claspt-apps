@@ -9,7 +9,8 @@
  * - Slide-in animation on appear
  * - Instant dismiss (no exit animation) for responsiveness
  * - Shadow DOM isolation to prevent host CSS interference
- * - Only shows "Update" when password actually changed
+ * - Only shows "Update" for the same account with a changed password
+ * - Closes only once the vault has answered, so the toast never lies
  *
  * All DOM is built programmatically (no innerHTML) to avoid XSS surface.
  *
@@ -24,16 +25,23 @@
 
 import type { Credential } from "@/shared/types";
 
+export type DismissReason = "closed" | "expired";
+
 export interface SaveBarOptions {
   username: string;
   password: string;
   url: string;
-  /** Existing credentials for this domain (if any). */
+  /** Confirmed credentials for this site; captures still waiting are not among them. */
   existing: Credential[];
-  onSave: () => void;
-  onUpdate: (credential: Credential) => void;
+  /** The capture could not reach the desktop and waits in the extension until it can. */
+  parked?: boolean;
+  /** Keep the capture as an ordinary login. Resolves false when the vault could not be reached. */
+  onSave: () => Promise<boolean>;
+  /** Put the new password onto this credential and drop the capture. */
+  onUpdate: (credential: Credential) => Promise<boolean>;
   onNever: () => void;
-  onDismiss: () => void;
+  /** Closed by hand, or left unanswered until the bar went away on its own. */
+  onDismiss: (reason: DismissReason) => void;
 }
 
 let currentBar: HTMLElement | null = null;
@@ -67,7 +75,8 @@ export function dismissSaveBar() {
 }
 
 /** Show a brief success toast after saving/updating. */
-function showSuccessToast(message: string) {
+function showSuccessToast(message: string, kind: "success" | "info" = "success") {
+  document.getElementById("claspt-toast-host")?.remove();
   const host = document.createElement("div");
   host.id = "claspt-toast-host";
   host.style.cssText = "all:initial; position:fixed; top:12px; right:16px; z-index:2147483647; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;";
@@ -79,7 +88,8 @@ function showSuccessToast(message: string) {
 
   const toast = el("div", "claspt-toast");
   const check = el("span", "toast-check");
-  check.textContent = "\u2713";
+  check.textContent = kind === "success" ? "\u2713" : "\u2139";
+  if (kind === "info") check.classList.add("toast-info");
   toast.appendChild(check);
   const text = el("span", "toast-text");
   text.textContent = message;
@@ -93,6 +103,44 @@ function showSuccessToast(message: string) {
 }
 
 /** Show the save bar at the top of the page. */
+/** How long the bar stays before it counts as unanswered. */
+const AUTO_DISMISS_MS = 30_000;
+
+function storedUsername(cred: Credential): string {
+  return (
+    cred.fields["username"] ||
+    cred.fields["user"] ||
+    cred.fields["login"] ||
+    cred.fields["email"] ||
+    ""
+  );
+}
+
+function storedPassword(cred: Credential): string {
+  return cred.fields["password"] || cred.fields["pass"] || "";
+}
+
+/**
+ * The credentials the submission may update: the same account, with a
+ * different password. Another account on the same site is never offered an
+ * Update; a second Google account is a new login, not a password change.
+ */
+export function updatableCredentials(
+  existing: Credential[],
+  username: string,
+  password: string,
+): Credential[] {
+  const wanted = username.trim().toLowerCase();
+  return existing.filter((cred) => {
+    if (storedPassword(cred) === password) return false;
+    const stored = storedUsername(cred).trim().toLowerCase();
+    // A password-only credential carries no account to compare; with no
+    // submitted username either, it is the one thing on the site to update.
+    if (!stored && !wanted) return true;
+    return stored === wanted;
+  });
+}
+
 export function showSaveBar(options: SaveBarOptions) {
   dismissSaveBar();
 
@@ -105,97 +153,118 @@ export function showSaveBar(options: SaveBarOptions) {
   style.textContent = SAVE_BAR_CSS;
   shadow.appendChild(style);
 
-  // Filter existing credentials: only show "Update" if the password actually changed
-  const needsUpdate = options.existing.filter((cred) => {
-    const storedPassword = cred.fields["password"] || "";
-    return storedPassword !== options.password;
-  });
-
-  // If password matches all existing creds, no save prompt needed
-  if (options.existing.length > 0 && needsUpdate.length === 0) {
-    return; // Password unchanged — nothing to do
+  const needsUpdate = updatableCredentials(options.existing, options.username, options.password);
+  const sameAccountUnchanged = options.existing.some(
+    (cred) =>
+      storedPassword(cred) === options.password &&
+      storedUsername(cred).trim().toLowerCase() === options.username.trim().toLowerCase(),
+  );
+  if (sameAccountUnchanged) {
+    return; // Nothing changed for this account — nothing to ask.
   }
 
   const hasUpdatable = needsUpdate.length > 0;
+  const account = options.username || "this login";
 
   // Build bar DOM
   const bar = el("div", "claspt-save-bar");
   bar.id = "bar";
+  bar.setAttribute("role", "dialog");
+  bar.setAttribute("aria-label", hasUpdatable ? "Update password" : "Save login");
 
   const inner = el("div", "bar-inner");
 
-  // Lock icon
   const iconWrap = el("div", "bar-icon");
   iconWrap.appendChild(lockIcon());
   inner.appendChild(iconWrap);
 
-  // Text
   const textWrap = el("div", "bar-text");
   const title = el("span", "bar-title");
-  title.textContent = hasUpdatable ? "Update password?" : "Save password?";
+  title.textContent = hasUpdatable
+    ? `Update the password for ${account}?`
+    : `Save ${account} in Claspt?`;
   const sub = el("span", "bar-sub");
-  sub.textContent = `${options.username} on this site`;
+  sub.textContent = options.parked
+    ? "Claspt is not running. This login is kept and will be saved when it is back."
+    : hasUpdatable
+      ? "The password you just used is different from the one saved."
+      : "It is already kept safe. Save it to fill it next time.";
   textWrap.appendChild(title);
   textWrap.appendChild(sub);
   inner.appendChild(textWrap);
 
-  // Actions
   const actions = el("div", "bar-actions");
+  const buttons: HTMLButtonElement[] = [];
 
-  // Update buttons for credentials with changed passwords (up to 2)
+  /**
+   * Run one action with the bar showing it is busy. The bar only closes once
+   * the vault has answered, so "Saved" is never said before it is true.
+   */
+  const run = (button: HTMLButtonElement, busyText: string, action: () => Promise<boolean>, done: string) => {
+    const idle = button.textContent ?? "";
+    button.textContent = busyText;
+    buttons.forEach((b) => (b.disabled = true));
+    bar.classList.add("is-busy");
+    void action().then((ok) => {
+      if (ok) {
+        dismissSaveBar();
+        showSuccessToast(done);
+        return;
+      }
+      dismissSaveBar();
+      showSuccessToast(
+        options.parked
+          ? "Kept. It will be saved when Claspt is back."
+          : "Could not reach Claspt. This login is kept in the waiting list.",
+        "info",
+      );
+      button.textContent = idle;
+    });
+  };
+
   if (hasUpdatable) {
     needsUpdate.slice(0, 2).forEach((cred) => {
-      const displayName = cred.fields["username"] || cred.fields["email"] || cred.label;
-      const btn = el("button", "bar-btn bar-btn-primary");
-      btn.textContent = needsUpdate.length === 1 ? "Update" : `Update "${displayName}"`;
-      btn.title = `Update password for ${cred.label}`;
-      onUserClick(btn, () => {
-        options.onUpdate(cred);
-        dismissSaveBar();
-        showSuccessToast("Password updated");
-      });
+      const btn = el("button", "bar-btn bar-btn-primary") as HTMLButtonElement;
+      btn.textContent = needsUpdate.length === 1 ? "Update" : `Update ${cred.label}`;
+      btn.title = `Update the password saved for ${cred.label}`;
+      onUserClick(btn, () => run(btn, "Updating…", () => options.onUpdate(cred), "Password updated"));
+      buttons.push(btn);
       actions.appendChild(btn);
     });
 
-    // Also offer "Save as new" when updating
-    const saveNewBtn = el("button", "bar-btn bar-btn-secondary");
+    const saveNewBtn = el("button", "bar-btn bar-btn-secondary") as HTMLButtonElement;
     saveNewBtn.textContent = "Save as new";
-    onUserClick(saveNewBtn, () => {
-      options.onSave();
-      dismissSaveBar();
-      showSuccessToast("Password saved");
-    });
+    saveNewBtn.title = "Keep this as a separate login";
+    onUserClick(saveNewBtn, () => run(saveNewBtn, "Saving…", options.onSave, "Saved as a new login"));
+    buttons.push(saveNewBtn);
     actions.appendChild(saveNewBtn);
   } else {
-    // New credential — primary action is Save
-    const saveBtn = el("button", "bar-btn bar-btn-primary");
+    const saveBtn = el("button", "bar-btn bar-btn-primary") as HTMLButtonElement;
     saveBtn.textContent = "Save";
-    onUserClick(saveBtn, () => {
-      options.onSave();
-      dismissSaveBar();
-      showSuccessToast("Password saved");
-    });
+    onUserClick(saveBtn, () => run(saveBtn, "Saving…", options.onSave, "Saved in Claspt"));
+    buttons.push(saveBtn);
     actions.appendChild(saveBtn);
   }
 
-  // Never button
-  const neverBtn = el("button", "bar-btn bar-btn-ghost");
-  neverBtn.textContent = "Never";
-  neverBtn.title = "Never save passwords for this site";
+  const neverBtn = el("button", "bar-btn bar-btn-ghost") as HTMLButtonElement;
+  neverBtn.textContent = "Never for this site";
+  neverBtn.title = "Do not offer to save logins on this site";
   onUserClick(neverBtn, () => {
     options.onNever();
     dismissSaveBar();
   });
+  buttons.push(neverBtn);
   actions.appendChild(neverBtn);
 
-  // Close button
-  const closeBtn = el("button", "bar-close");
+  const closeBtn = el("button", "bar-close") as HTMLButtonElement;
   closeBtn.appendChild(closeIcon());
-  closeBtn.title = "Dismiss";
+  closeBtn.title = "Not now";
+  closeBtn.setAttribute("aria-label", "Not now");
   onUserClick(closeBtn, () => {
-    options.onDismiss();
+    options.onDismiss("closed");
     dismissSaveBar();
   });
+  buttons.push(closeBtn);
   actions.appendChild(closeBtn);
 
   inner.appendChild(actions);
@@ -205,14 +274,12 @@ export function showSaveBar(options: SaveBarOptions) {
   document.documentElement.appendChild(host);
   currentBar = host;
 
-  // Slide-in animation
   requestAnimationFrame(() => bar.classList.add("claspt-save-bar-visible"));
 
-  // Auto-dismiss after 30 seconds
   autoDismissTimer = setTimeout(() => {
-    options.onDismiss();
+    options.onDismiss("expired");
     dismissSaveBar();
-  }, 30_000);
+  }, AUTO_DISMISS_MS);
 }
 
 // ── Helpers ──────────────────────────────────────
@@ -277,6 +344,13 @@ const SAVE_BAR_CSS = `
   .claspt-save-bar-visible {
     transform: translateY(0);
   }
+  @media (prefers-reduced-motion: reduce) {
+    .claspt-save-bar { transition: none; }
+  }
+  @media (max-width: 640px) {
+    .bar-inner { flex-wrap: wrap; }
+    .bar-actions { width: 100%; justify-content: flex-end; }
+  }
   .bar-inner {
     display: flex;
     align-items: center;
@@ -312,7 +386,7 @@ const SAVE_BAR_CSS = `
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 300px;
+    max-width: 520px;
   }
   .bar-actions {
     display: flex;
@@ -341,7 +415,9 @@ const SAVE_BAR_CSS = `
     background: #d4930a;
     color: #0f0f12;
   }
-  .bar-btn-primary:hover { background: #c4b5fd; }
+  .bar-btn-primary:hover { background: #e2a318; }
+  .bar-btn:disabled { cursor: default; opacity: 0.7; }
+  .is-busy .bar-close { pointer-events: none; opacity: 0.5; }
   .bar-btn-secondary {
     background: #2d333b;
     color: #e6edf3;
@@ -403,6 +479,9 @@ const TOAST_CSS = `
     color: #4ade80;
     font-weight: 700;
     font-size: 14px;
+  }
+  .toast-check.toast-info {
+    color: #d4930a;
   }
   .toast-text {
     color: #e6edf3;

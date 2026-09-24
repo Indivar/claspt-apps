@@ -21,6 +21,8 @@ export type PairResult =
   | { ok: true; token: string; scope: "notes" | "secrets" }
   /** The desktop app answered, but no pairing window is open. */
   | { ok: false; reason: "not-open" }
+  /** The desktop has no pairing route at all: it predates pairing. */
+  | { ok: false; reason: "desktop-too-old" }
   /** Nothing answered on the port — Claspt is not running, or the API is off. */
   | { ok: false; reason: "unreachable" }
   /** The extension has not been granted access to 127.0.0.1 yet. */
@@ -54,6 +56,12 @@ export async function requestPairing(port: number): Promise<PairResult> {
     });
   } catch {
     return { ok: false, reason: "unreachable" };
+  }
+
+  if (response.status === 404) {
+    // No such route: a desktop from before pairing existed. Telling its owner
+    // to press Connect would send them looking for a button it never had.
+    return { ok: false, reason: "desktop-too-old" };
   }
 
   if (!response.ok) {

@@ -2,9 +2,8 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 //! The licence system is not part of the public tree. This is what the
-//! rest of the app needs from it: a status that says nothing is licensed
-//! and nothing is on trial, so every feature the public build has is
-//! simply available.
+//! rest of the app needs from it: a status that says nothing is licensed,
+//! so every feature the public build has is simply available.
 
 pub mod validator {
     use std::path::Path;
@@ -19,7 +18,6 @@ pub mod validator {
         pub email: Option<String>,
         pub expires_at: Option<String>,
         pub days_remaining: Option<i64>,
-        pub is_trial: bool,
         pub is_expired: bool,
     }
 
@@ -34,7 +32,6 @@ pub mod validator {
             email: None,
             expires_at: None,
             days_remaining: None,
-            is_trial: false,
             is_expired: false,
         }
     }

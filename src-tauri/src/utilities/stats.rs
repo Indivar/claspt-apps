@@ -76,7 +76,7 @@ pub fn vault_stats(vault_dir: &Path) -> Result<VaultStats, PageError> {
 
     // Top tags sorted by count desc
     let mut top_tags: Vec<(String, usize)> = tag_counts.into_iter().collect();
-    top_tags.sort_by(|a, b| b.1.cmp(&a.1));
+    top_tags.sort_by_key(|t| std::cmp::Reverse(t.1));
     top_tags.truncate(20);
 
     Ok(VaultStats {

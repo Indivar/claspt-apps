@@ -32,7 +32,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -111,8 +110,9 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref())
 }
 
-/// `clsn_…3f9a`: the scope prefix and the last four characters.
-fn hint_for(token: &str) -> String {
+/// `clsn_…3f9a`: the scope prefix and the last four characters. Safe to
+/// print anywhere: it is what the registry shows next to each client.
+pub fn token_hint(token: &str) -> String {
     let prefix_len = 5;
     if token.len() < prefix_len + 4 {
         return "…".to_string();
@@ -133,7 +133,7 @@ fn record(
         name: name.to_string(),
         scope,
         token_hash: hash_token(token),
-        hint: hint_for(token),
+        hint: token_hint(token),
         created_at: Utc::now(),
         namespaces: namespaces.to_vec(),
         kind: kind.map(str::to_string),
@@ -244,14 +244,14 @@ pub fn with_registry<R>(
         .truncate(false)
         .write(true)
         .open(&lock_path)?;
-    FileExt::lock_exclusive(&lock)?;
+    lock.lock()?;
     let outcome = (|| {
         let mut registry = load(vault_dir)?;
         let result = change(&mut registry)?;
         save(vault_dir, &registry)?;
         Ok(result)
     })();
-    let _ = FileExt::unlock(&lock);
+    let _ = lock.unlock();
     outcome
 }
 

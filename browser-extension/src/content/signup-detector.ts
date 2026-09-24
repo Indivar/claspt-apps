@@ -14,6 +14,8 @@
  * silently saving) so the user can choose save/update/never.
  */
 
+import type { Message } from "@/shared/types";
+
 const SIGNUP_PASSWORD_SELECTORS = [
   'input[autocomplete="new-password"]',
   'input[name="new-password"]',
@@ -33,49 +35,40 @@ export interface CapturedCredentials {
 
 // ── Multi-step login support ──
 // Google, Microsoft, Apple, etc. show email on page 1 and password on page 2.
-// We persist the email from step 1 so it's available when step 2 submits.
+// The email from step 1 is kept by the background worker, bound to this host,
+// until step 2 submits (see background/session-store.ts).
 
-const STEP_USERNAME_KEY = "claspt_step_username";
-
-interface StepUsername {
-  value: string;
-  domain: string;
-  timestamp: number;
+function sendSession(message: Message, cb?: (response: unknown) => void): void {
+  try {
+    if (!chrome.runtime?.id) return;
+    chrome.runtime.sendMessage(message, (response: unknown) => {
+      if (chrome.runtime.lastError) {
+        cb?.(null);
+        return;
+      }
+      cb?.(response);
+    });
+  } catch {
+    cb?.(null);
+  }
 }
 
 function storeStepUsername(username: string): void {
-  const data: StepUsername = {
-    value: username,
-    domain: window.location.hostname,
-    timestamp: Date.now(),
-  };
-  try {
-    chrome.storage.session.set({ [STEP_USERNAME_KEY]: data });
-  } catch {
-    // Session storage might not be available in all contexts
-  }
+  sendSession({ type: "STEP_USERNAME_SET", value: username });
 }
 
 async function getStepUsername(): Promise<string | null> {
-  try {
-    const result = await chrome.storage.session.get(STEP_USERNAME_KEY);
-    const data = result[STEP_USERNAME_KEY] as StepUsername | undefined;
-    if (!data) return null;
-    // Same domain and within 10 minutes
-    if (data.domain !== window.location.hostname) return null;
-    if (Date.now() - data.timestamp > 600_000) return null;
-    return data.value;
-  } catch {
-    return null;
-  }
+  return new Promise((resolve) => {
+    sendSession({ type: "STEP_USERNAME_GET" }, (response) => {
+      const res = response as { type?: string; value?: string | null } | null;
+      resolve(res?.type === "STEP_USERNAME_RESULT" ? (res.value ?? null) : null);
+    });
+    setTimeout(() => resolve(null), 3000);
+  });
 }
 
 function clearStepUsername(): void {
-  try {
-    chrome.storage.session.remove(STEP_USERNAME_KEY);
-  } catch {
-    // Ignore
-  }
+  sendSession({ type: "STEP_USERNAME_CLEAR" });
 }
 
 // ── Username detection from page context (for multi-step flows) ──

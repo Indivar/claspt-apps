@@ -4,11 +4,13 @@
 import React, { useState, useCallback, useEffect } from "react";
 import type { Credential, Message } from "@/shared/types";
 import { estimateStrength } from "@/shared/generator";
-import { credKey, loadCredState, togglePin as togglePinShared, sortByPinAndRecency, isPinned, markUsed, onCredStateChange, type CredState } from "@/shared/cred-state";
+import { credKey, loadCredState, togglePin as togglePinShared, sortByPinAndRecency, isPinned, onCredStateChange, type CredState } from "@/shared/cred-state";
 import { isPrimary, isDeprecated, statusBucket } from "@/shared/cred-flags";
 import { formatTimeAgo } from "@/shared/gen-history";
 import type { StoredGeneratedEntry } from "@claspt/shared/generated-history";
 import { buildFieldPatch } from "@/shared/patch-field";
+import { AddTwoFactor } from "./AddTwoFactor";
+import { readTotpSeed, isSensitiveField } from "@claspt/shared/credential-fields";
 import { RowContextMenu, type ContextAction } from "./RowContextMenu";
 
 interface Props {
@@ -81,15 +83,21 @@ function TotpInline({ secret, onCopy, copyFeedback, label }: {
   label: string;
 }) {
   const [code, setCode] = useState("");
-  const [remaining, setRemaining] = useState(30);
+  const [remaining, setRemaining] = useState(0);
+  // The period comes from the seed. Assuming thirty makes a sixty-second
+  // credential draw its ring at double speed and refetch halfway through.
+  const [period, setPeriod] = useState(30);
+  const [failed, setFailed] = useState(false);
   const feedbackKey = `${label}:totp`;
 
   const fetchTotp = useCallback(() => {
     chrome.runtime.sendMessage({ type: "GENERATE_TOTP", secret } as Message, (res: Message) => {
-      if (res?.type === "TOTP_RESULT") {
-        setCode(res.code);
-        setRemaining(res.remaining);
-      }
+      if (res?.type !== "TOTP_RESULT") return;
+      if (!res.code) { setFailed(true); return; }
+      setFailed(false);
+      setCode(res.code);
+      setRemaining(res.remaining);
+      setPeriod(res.period || 30);
     });
   }, [secret]);
 
@@ -97,13 +105,24 @@ function TotpInline({ secret, onCopy, copyFeedback, label }: {
     fetchTotp();
     const interval = setInterval(() => {
       setRemaining((prev) => {
-        if (prev <= 1) { fetchTotp(); return 30; }
+        if (prev <= 1) { fetchTotp(); return period; }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [fetchTotp]);
+  }, [fetchTotp, period]);
 
+  if (failed) {
+    // Rendering nothing here used to hide a mistyped key completely: the row
+    // looked like a credential with no two-factor at all, so nobody went
+    // looking for the reason.
+    return (
+      <div className="mt-1 rounded-md border border-red-500/20 bg-red-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-red-400">
+        This two-factor key could not be read. Check the{" "}
+        <span className="font-mono">totp</span> field on this credential in Claspt.
+      </div>
+    );
+  }
   if (!code) return null;
   const circumference = 2 * Math.PI * 10;
 
@@ -112,7 +131,7 @@ function TotpInline({ secret, onCopy, copyFeedback, label }: {
       <svg width="22" height="22" viewBox="0 0 24 24" className="shrink-0">
         <circle cx="12" cy="12" r="10" fill="none" stroke="#2d333b" strokeWidth="2" />
         <circle cx="12" cy="12" r="10" fill="none" stroke="#d4930a" strokeWidth="2"
-          strokeDasharray={circumference} strokeDashoffset={circumference * (1 - remaining / 30)}
+          strokeDasharray={circumference} strokeDashoffset={circumference * (1 - remaining / period)}
           strokeLinecap="round" transform="rotate(-90 12 12)"
           style={{ transition: "stroke-dashoffset 1s linear" }} />
         <text x="12" y="12" textAnchor="middle" dominantBaseline="central" fill="#8b949e" fontSize="7">{remaining}</text>
@@ -230,15 +249,19 @@ function CredentialEditForm({
   const [error, setError] = useState<string | null>(null);
   const [savedTick, setSavedTick] = useState(false);
 
-  // Re-sync if the credential prop changes (cache refresh)
-  useEffect(() => {
+  // Re-sync if the credential prop changes (cache refresh) or when editing
+  // ends, but never under an edit in progress. Adjusted during render rather
+  // than in an effect: React applies the change before anything is shown.
+  const initialFingerprint = JSON.stringify([initialUsername, initialPassword, initialExtras]);
+  const [synced, setSynced] = useState({ fingerprint: initialFingerprint, editing });
+  if (synced.fingerprint !== initialFingerprint || synced.editing !== editing) {
+    setSynced({ fingerprint: initialFingerprint, editing });
     if (!editing) {
       setUsername(initialUsername);
       setPassword(initialPassword);
       setExtras(initialExtras);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialUsername, initialPassword, JSON.stringify(initialExtras), editing]);
+  }
 
   const updateExtra = (idx: number, kind: "key" | "value", value: string) => {
     setExtras((prev) => prev.map((row, i) => {
@@ -408,7 +431,7 @@ function CredentialEditForm({
         <div className="space-y-1.5 pl-1">
           {extras.map(([key, value], idx) => {
             // Sensitive values (TOTP secrets, etc.) are masked unless individually revealed.
-            const isSensitive = ["totp", "otp", "otp_secret", "secret", "authenticator", "2fa"].includes(key.toLowerCase());
+            const isSensitive = isSensitiveField(key);
             return (
               <ExtraFieldRow
                 key={idx}
@@ -519,8 +542,13 @@ function NoteField({ credential }: { credential: Credential }) {
   const [saving, setSaving] = useState(false);
   const [savedTick, setSavedTick] = useState(false);
 
-  // Re-sync if the credential itself changes (e.g. cache refresh)
-  useEffect(() => { setValue(initial); }, [initial]);
+  // Re-sync if the credential itself changes (e.g. cache refresh). Adjusted
+  // during render rather than in an effect, so the old text is never shown.
+  const [syncedInitial, setSyncedInitial] = useState(initial);
+  if (syncedInitial !== initial) {
+    setSyncedInitial(initial);
+    setValue(initial);
+  }
 
   const save = useCallback(() => {
     setSaving(true);
@@ -602,7 +630,12 @@ function UrlMatchPolicy({ credential }: { credential: Credential }) {
   const [value, setValue] = useState(stored);
   const [tick, setTick] = useState(false);
 
-  useEffect(() => { setValue(stored); }, [stored]);
+  // Re-sync if the credential itself changes (e.g. cache refresh); see NoteField.
+  const [syncedStored, setSyncedStored] = useState(stored);
+  if (syncedStored !== stored) {
+    setSyncedStored(stored);
+    setValue(stored);
+  }
 
   const change = (next: string) => {
     setValue(next);
@@ -1020,13 +1053,16 @@ function CredentialCard({
   const [editing, setEditing] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [moving, setMoving] = useState(false);
+  // A key saved from this card shows its code straight away, rather than
+  // after the next cache refresh: the person has just scanned it and the
+  // site is about to ask them to confirm a code.
+  const [justAddedSeed, setJustAddedSeed] = useState("");
 
   const username =
     credential.fields["username"] || credential.fields["user"] ||
     credential.fields["email"] || credential.fields["login"] || "";
   const password = credential.fields["password"] || credential.fields["pass"] || "";
-  const totpSecret =
-    credential.fields["totp"] || credential.fields["otp_secret"] || credential.fields["authenticator"] || "";
+  const totpSecret = readTotpSeed(credential.fields);
   // No external favicon fetch — letter-initials avatar is fully local.
   const url = getCredentialUrl(credential);
   const feedbackKey = (field: string) => `${credential.label}:${field}`;
@@ -1272,7 +1308,17 @@ function CredentialCard({
                 </div>
               ),
             )}
-          {totpSecret && <TotpInline secret={totpSecret} onCopy={onCopy} copyFeedback={copyFeedback} label={credential.label} />}
+          {(totpSecret || justAddedSeed) && (
+            <TotpInline
+              secret={totpSecret || justAddedSeed}
+              onCopy={onCopy}
+              copyFeedback={copyFeedback}
+              label={credential.label}
+            />
+          )}
+          {!totpSecret && !justAddedSeed && (
+            <AddTwoFactor credential={credential} onSaved={setJustAddedSeed} />
+          )}
           <CredentialEditForm
             credential={credential}
             editing={editing}

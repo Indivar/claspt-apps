@@ -53,36 +53,52 @@ pub struct GeneratorDefaults {
 }
 
 /// Read extension preferences from vault.
-pub fn get_prefs(vault_dir: &Path) -> ExtensionPrefs {
-    InternalStore::read(vault_dir, FILENAME)
+pub fn get_prefs(vault_dir: &Path, master_key: &[u8]) -> ExtensionPrefs {
+    InternalStore::read_sealed(vault_dir, FILENAME, master_key)
 }
 
 /// Save extension preferences to vault.
-pub fn save_prefs(vault_dir: &Path, prefs: &ExtensionPrefs) -> std::io::Result<()> {
+pub fn save_prefs(
+    vault_dir: &Path,
+    master_key: &[u8],
+    prefs: &ExtensionPrefs,
+) -> std::io::Result<()> {
     let mut prefs = prefs.clone();
     prefs.updated_at = Some(chrono::Utc::now().to_rfc3339());
-    InternalStore::write(vault_dir, FILENAME, &prefs)
+    InternalStore::write_sealed(vault_dir, FILENAME, &prefs, master_key)
 }
 
 /// Add a domain to the excluded list.
-pub fn add_excluded_domain(vault_dir: &Path, domain: &str) -> std::io::Result<()> {
-    let mut prefs = get_prefs(vault_dir);
+pub fn add_excluded_domain(
+    vault_dir: &Path,
+    master_key: &[u8],
+    domain: &str,
+) -> std::io::Result<()> {
+    let mut prefs = get_prefs(vault_dir, master_key);
     if !prefs.excluded_domains.contains(&domain.to_string()) {
         prefs.excluded_domains.push(domain.to_string());
     }
-    save_prefs(vault_dir, &prefs)
+    save_prefs(vault_dir, master_key, &prefs)
 }
 
 /// Remove a domain from the excluded list.
-pub fn remove_excluded_domain(vault_dir: &Path, domain: &str) -> std::io::Result<()> {
-    let mut prefs = get_prefs(vault_dir);
+pub fn remove_excluded_domain(
+    vault_dir: &Path,
+    master_key: &[u8],
+    domain: &str,
+) -> std::io::Result<()> {
+    let mut prefs = get_prefs(vault_dir, master_key);
     prefs.excluded_domains.retain(|d| d != domain);
-    save_prefs(vault_dir, &prefs)
+    save_prefs(vault_dir, master_key, &prefs)
 }
 
 /// Record a recently used credential.
-pub fn record_recent(vault_dir: &Path, entry: RecentlyUsedEntry) -> std::io::Result<()> {
-    let mut prefs = get_prefs(vault_dir);
+pub fn record_recent(
+    vault_dir: &Path,
+    master_key: &[u8],
+    entry: RecentlyUsedEntry,
+) -> std::io::Result<()> {
+    let mut prefs = get_prefs(vault_dir, master_key);
 
     // Remove existing entry for same credential
     prefs
@@ -95,5 +111,5 @@ pub fn record_recent(vault_dir: &Path, entry: RecentlyUsedEntry) -> std::io::Res
     // Keep max 50
     prefs.recently_used.truncate(50);
 
-    save_prefs(vault_dir, &prefs)
+    save_prefs(vault_dir, master_key, &prefs)
 }

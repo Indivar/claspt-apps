@@ -2,20 +2,31 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 import { detectFields, observeForms, type DetectedField } from "./form-detector";
+import { urlMatchPolicyOf } from "@claspt/shared/credential-fields";
 import { dbg, loadDebugState } from "@/shared/debug";
-import { fillFields, getLastFilled, isFillableOrigin } from "./form-filler";
-import { injectInlineIcons, removeInlineIcons } from "./inline-icon";
+import {
+  fillFields,
+  fillIdentityFields,
+  getLastFilled,
+  isFillableOrigin,
+} from "./form-filler";
+import { injectInlineIcons, removeInlineIcons, setEmptyReason } from "./inline-icon";
+import {
+  injectIdentityIcons,
+  removeIdentityIcons,
+  type InlineIdentity,
+} from "./inline-identity";
 import { observeSignupForms, type CapturedCredentials } from "./signup-detector";
 import { showSaveBar, dismissSaveBar } from "./save-bar";
+import { watchForRejection } from "./rejection-watch";
 import { isAutofillSafe, isDomainMismatch } from "@/shared/url-matching";
 import {
   showPhishingWarning,
   showInsecureOriginWarning,
   showUnverifiedSiteWarning,
 } from "./warnings";
-import { STORAGE_KEY_UNSAVED } from "@/shared/constants";
 import { isExcludedDomain } from "@/shared/domain-prefs";
-import type { Credential, Message } from "@/shared/types";
+import type { CaptureOutcome, Credential, Message, PendingSave } from "@/shared/types";
 
 /**
  * Content script — runs in the page's isolated world.
@@ -36,18 +47,26 @@ let detectedFields: DetectedField[] = [];
  * of just the clipboard.
  */
 let lastFocusedInput: HTMLInputElement | HTMLTextAreaElement | null = null;
-document.addEventListener("contextmenu", (e) => {
-  const t = e.target as HTMLElement | null;
-  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) {
-    lastFocusedInput = t as HTMLInputElement | HTMLTextAreaElement;
-  }
-}, true);
-document.addEventListener("focusin", (e) => {
-  const t = e.target as HTMLElement | null;
-  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) {
-    lastFocusedInput = t as HTMLInputElement | HTMLTextAreaElement;
-  }
-}, true);
+document.addEventListener(
+  "contextmenu",
+  (e) => {
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) {
+      lastFocusedInput = t as HTMLInputElement | HTMLTextAreaElement;
+    }
+  },
+  true,
+);
+document.addEventListener(
+  "focusin",
+  (e) => {
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) {
+      lastFocusedInput = t as HTMLInputElement | HTMLTextAreaElement;
+    }
+  },
+  true,
+);
 
 // ── Message helpers ──────────────────────────────
 
@@ -69,17 +88,15 @@ function safeSendMessage(message: unknown, callback: (response: unknown) => void
 
 async function getCredentialsForCurrentPage(): Promise<Credential[]> {
   return new Promise((resolve) => {
-    safeSendMessage(
-      { type: "GET_CREDENTIALS", domain: "" },
-      (response: unknown) => {
-        const res = response as { type?: string; credentials?: Credential[] };
-        if (res?.type === "CREDENTIALS_RESULT") {
-          resolve(res.credentials ?? []);
-        } else {
-          resolve([]);
-        }
+    safeSendMessage({ type: "GET_CREDENTIALS", domain: "" }, (response: unknown) => {
+      const res = response as Partial<Extract<Message, { type: "CREDENTIALS_RESULT" }>>;
+      if (res?.type === "CREDENTIALS_RESULT") {
+        setEmptyReason(res.reason);
+        resolve(res.credentials ?? []);
+      } else {
+        resolve([]);
       }
-    );
+    });
     // Resolve after 3s if no response (context may be dead)
     setTimeout(() => resolve([]), 3000);
   });
@@ -87,17 +104,14 @@ async function getCredentialsForCurrentPage(): Promise<Credential[]> {
 
 async function checkExisting(): Promise<Credential[]> {
   return new Promise((resolve) => {
-    safeSendMessage(
-      { type: "CHECK_EXISTING", domain: "" },
-      (response: unknown) => {
-        const res = response as { type?: string; credentials?: Credential[] };
-        if (res?.type === "CHECK_EXISTING_RESULT") {
-          resolve(res.credentials ?? []);
-        } else {
-          resolve([]);
-        }
+    safeSendMessage({ type: "CHECK_EXISTING", domain: "" }, (response: unknown) => {
+      const res = response as { type?: string; credentials?: Credential[] };
+      if (res?.type === "CHECK_EXISTING_RESULT") {
+        resolve(res.credentials ?? []);
+      } else {
+        resolve([]);
       }
-    );
+    });
     setTimeout(() => resolve([]), 3000);
   });
 }
@@ -116,176 +130,169 @@ async function isExcludedSite(): Promise<boolean> {
 
 async function isNeverSave(): Promise<boolean> {
   return new Promise((resolve) => {
-    safeSendMessage(
-      { type: "GET_DOMAIN_PREF", domain: "" },
-      (response: unknown) => {
-        const res = response as { type?: string; pref?: { neverSave?: boolean } };
-        if (res?.type === "DOMAIN_PREF_RESULT" && res.pref?.neverSave) {
-          resolve(true);
-        } else {
-          resolve(false);
-        }
+    safeSendMessage({ type: "GET_DOMAIN_PREF", domain: "" }, (response: unknown) => {
+      const res = response as { type?: string; pref?: { neverSave?: boolean } };
+      if (res?.type === "DOMAIN_PREF_RESULT" && res.pref?.neverSave) {
+        resolve(true);
+      } else {
+        resolve(false);
       }
-    );
+    });
     setTimeout(() => resolve(false), 3000);
   });
 }
 
-function saveCredential(creds: CapturedCredentials): void {
-  safeSendMessage({
-    type: "SAVE_CREDENTIAL",
-    username: creds.username,
-    password: creds.password,
-    url: creds.url,
-    domain: creds.domain,
-  }, () => {});
+/** Where a capture went: a vault page, or the outbox while Claspt is away. */
+interface CaptureHandle {
+  pagePath?: string;
+  parked: boolean;
+}
+
+type CaptureResult = Extract<Message, { type: "CAPTURE_RESULT" }>;
+
+/**
+ * Take the submitted login into the vault right now. Whatever the page does
+ * next, a redirect, a second factor, a crash, the password is already kept.
+ */
+async function captureLogin(creds: CapturedCredentials): Promise<CaptureHandle | null> {
+  const res = await sessionRequest<CaptureResult>(
+    {
+      type: "CAPTURE_LOGIN",
+      username: creds.username,
+      password: creds.password,
+      url: creds.url,
+      isSignup: creds.isSignup,
+    },
+    CAPTURE_TIMEOUT_MS,
+  );
+  if (res?.type !== "CAPTURE_RESULT" || !res.success) return null;
+  return { pagePath: res.pagePath, parked: res.parked === true };
+}
+
+/** The owner said Save: the capture becomes an ordinary login. */
+async function confirmCapture(handle: CaptureHandle, creds: CapturedCredentials): Promise<boolean> {
+  const res = await sessionRequest<Extract<Message, { type: "CONFIRM_CAPTURE_RESULT" }>>(
+    { type: "CONFIRM_CAPTURE", pagePath: handle.pagePath, username: creds.username },
+    CAPTURE_TIMEOUT_MS,
+  );
+  const ok = res?.type === "CONFIRM_CAPTURE_RESULT" && res.success;
+  if (ok) clearPendingSave();
+  return ok;
+}
+
+/** The capture is not wanted: to the trash, or out of the outbox. */
+async function discardCapture(handle: CaptureHandle, creds: CapturedCredentials): Promise<boolean> {
+  const res = await sessionRequest<Extract<Message, { type: "DISCARD_CAPTURE_RESULT" }>>(
+    { type: "DISCARD_CAPTURE", pagePath: handle.pagePath, username: creds.username },
+    CAPTURE_TIMEOUT_MS,
+  );
   clearPendingSave();
+  return res?.type === "DISCARD_CAPTURE_RESULT" && res.success;
 }
 
 /**
- * Update an existing credential from the save bar.
+ * Update an existing credential from the save bar, then drop the capture
+ * that was taken for the same submission.
  *
- * Patches only the fields the user actually re-entered. The previous
- * implementation sent UPDATE_CREDENTIAL, which fetched the page and rewrote
- * its first secret block from scratch — silently discarding `totp`, `note`,
- * `url_match`, `primary`, `deprecated` and every custom field on it.
+ * Patches only the fields the user actually re-entered, so `totp`, `note`,
+ * `url_match`, `primary`, `deprecated` and every custom field survive.
  */
-function updateCredential(creds: CapturedCredentials, existing: Credential): void {
+async function updateCredential(
+  creds: CapturedCredentials,
+  existing: Credential,
+  handle: CaptureHandle,
+): Promise<boolean> {
   const passwordKey = "pass" in existing.fields ? "pass" : "password";
   const fields: Record<string, string> = { [passwordKey]: creds.password };
   if (creds.username) {
-    const usernameKey = ["username", "user", "login", "email"].find((k) => k in existing.fields) ?? "username";
+    const usernameKey =
+      ["username", "user", "login", "email"].find((k) => k in existing.fields) ??
+      "username";
     fields[usernameKey] = creds.username;
   }
-  safeSendMessage({
-    type: "PATCH_SECRET_BLOCK",
-    pagePath: existing.pagePath,
-    label: existing.label,
-    fields,
-  } as Message, () => {});
-  clearPendingSave();
+  const res = await sessionRequest<Extract<Message, { type: "PATCH_SECRET_BLOCK_RESULT" }>>(
+    {
+      type: "PATCH_SECRET_BLOCK",
+      pagePath: existing.pagePath,
+      label: existing.label,
+      fields,
+    } as Message,
+    CAPTURE_TIMEOUT_MS,
+  );
+  if (res?.type !== "PATCH_SECRET_BLOCK_RESULT" || !res.success) {
+    dbg("updateCredential failed:", res?.errorMessage ?? "no response");
+    return false;
+  }
+  await discardCapture(handle, creds);
+  return true;
 }
 
 function setNeverSave(): void {
-  safeSendMessage({
-    type: "SET_DOMAIN_PREF",
-    domain: "",
-    pref: { autoFillEnabled: true, neverSave: true },
-  }, () => {});
+  safeSendMessage(
+    {
+      type: "SET_DOMAIN_PREF",
+      domain: "",
+      pref: { autoFillEnabled: true, neverSave: true },
+    },
+    () => {},
+  );
   clearPendingSave();
 }
 
-// ── Pending save persistence (survives navigation) ──
-
-interface PendingSave {
-  username: string;
-  password: string;
-  url: string;
-  domain: string;
-  isSignup: boolean;
-  timestamp: number;
+/** Tell the popup what became of the last submission on this site. */
+function recordOutcome(outcome: CaptureOutcome, username: string, pagePath?: string): void {
+  void sessionRequest({ type: "LAST_CAPTURE_SET", capture: { outcome, username, pagePath } });
 }
 
-function storePendingSave(creds: CapturedCredentials): void {
-  const pending: PendingSave = {
-    ...creds,
-    timestamp: Date.now(),
-  };
-  try {
-    chrome.storage.session.set({ claspt_pending_save: pending });
-  } catch {
-    // Storage not available on this page (e.g., chrome:// pages)
-  }
+// ── Pending save persistence (survives navigation) ──
+//
+// The capture itself is in the vault. What lives with the background worker
+// is only the handoff that lets the bar come back on the next page of this
+// site, bound to the site by the worker (see background/session-store.ts).
+// This file never touches session storage.
+
+/** A vault write can take longer than a session lookup. */
+const CAPTURE_TIMEOUT_MS = 15_000;
+
+function sessionRequest<T extends Message>(
+  message: Message,
+  timeoutMs = 3000,
+): Promise<T | null> {
+  return new Promise((resolve) => {
+    safeSendMessage(message, (response: unknown) => {
+      resolve((response as T | undefined) ?? null);
+    });
+    setTimeout(() => resolve(null), timeoutMs);
+  });
+}
+
+function storePendingSave(creds: CapturedCredentials, pagePath?: string): void {
+  void sessionRequest({
+    type: "PENDING_SAVE_SET",
+    credentials: {
+      username: creds.username,
+      password: creds.password,
+      url: creds.url,
+      isSignup: creds.isSignup,
+      pagePath,
+    },
+  });
 }
 
 function clearPendingSave(): void {
-  try {
-    chrome.storage.session.remove("claspt_pending_save");
-  } catch {
-    // Storage not available
-  }
+  void sessionRequest({ type: "PENDING_SAVE_CLEAR" });
 }
 
 async function getPendingSave(): Promise<PendingSave | null> {
-  try {
-    const result = await chrome.storage.session.get("claspt_pending_save");
-    const pending = result["claspt_pending_save"] as PendingSave | undefined;
-    if (!pending) return null;
-    if (Date.now() - pending.timestamp > 300_000) {
-      await addToUnsavedQueue(pending);
-      clearPendingSave();
-      return null;
-    }
-    return pending;
-  } catch {
-    return null;
-  }
+  const res = await sessionRequest<Extract<Message, { type: "PENDING_SAVE_RESULT" }>>({
+    type: "PENDING_SAVE_GET",
+  });
+  return res?.type === "PENDING_SAVE_RESULT" ? res.pending : null;
 }
 
-// ── Unsaved credentials queue (in-memory only — cleared on browser close) ──
-//
-// SECURITY: these entries contain cleartext passwords the user hasn't yet
-// committed to the vault. They live in chrome.storage.session (memory-backed,
-// wiped when the browser closes) — NEVER chrome.storage.local, which persists
-// plaintext to disk. The background worker also wipes this key on auto-lock
-// (see lockExtension). Reading it back from the popup works because the
-// background worker raises the session-storage access level to include
-// untrusted (content-script) contexts on startup.
-
-export interface UnsavedCredential {
-  username: string;
-  password: string;
-  url: string;
-  domain: string;
-  timestamp: number;
-}
-
-const UNSAVED_KEY = STORAGE_KEY_UNSAVED;
-const MAX_UNSAVED = 50;
-
-async function addToUnsavedQueue(creds: PendingSave | CapturedCredentials): Promise<void> {
-  let result;
-  try {
-    result = await chrome.storage.session.get(UNSAVED_KEY);
-  } catch {
-    return; // Storage not available
-  }
-  const queue: UnsavedCredential[] = result[UNSAVED_KEY] ?? [];
-
-  // Don't add duplicates (same domain + username)
-  const isDuplicate = queue.some(
-    (q) => q.domain === creds.domain && q.username === creds.username && q.password === creds.password
-  );
-  if (isDuplicate) return;
-
-  const entry: UnsavedCredential = {
-    username: creds.username,
-    password: creds.password,
-    url: creds.url,
-    domain: creds.domain,
-    timestamp: Date.now(),
-  };
-  const updated = [entry, ...queue].slice(0, MAX_UNSAVED);
-  await chrome.storage.session.set({ [UNSAVED_KEY]: updated });
-}
-
-/** Move credentials to the unsaved queue when dismissed without saving. */
-async function movePendingToUnsaved(): Promise<void> {
-  const pending = await getPendingSaveRaw();
-  if (pending) {
-    await addToUnsavedQueue(pending);
-    clearPendingSave();
-  }
-}
-
-/** Get pending save without expiry check (for moving to unsaved). */
-async function getPendingSaveRaw(): Promise<PendingSave | null> {
-  try {
-    const result = await chrome.storage.session.get("claspt_pending_save");
-    return (result["claspt_pending_save"] as PendingSave) ?? null;
-  } catch {
-    return null;
-  }
+/** The bar was closed by hand: stop asking on this site. The capture stays listed. */
+function parkPendingSave(): void {
+  void sessionRequest({ type: "PENDING_SAVE_PARK" });
 }
 
 // ── Inline icons ──────────────────────────────────
@@ -295,81 +302,128 @@ function updateInlineIcons(fields: DetectedField[]) {
     chrome.storage.local.get("claspt_config", (result) => {
       if (chrome.runtime.lastError) return;
       const config = result["claspt_config"];
-      if (isExcludedDomain(window.location.hostname, config?.excludedDomains ?? [])) return;
+      if (isExcludedDomain(window.location.hostname, config?.excludedDomains ?? []))
+        return;
       if (!config || config.autoFillEnabled !== false) {
         injectInlineIcons(fields, getCredentialsForCurrentPage);
+        injectIdentityIcons(fields, getIdentitiesForCurrentPage);
       }
     });
   } catch {
     // Storage not available — still inject icons with defaults
     injectInlineIcons(fields, getCredentialsForCurrentPage);
+    injectIdentityIcons(fields, getIdentitiesForCurrentPage);
   }
+}
+
+/**
+ * The stored identities, ordered with the one last used on this site first.
+ *
+ * Ordering happens in the background because that is where the per-site record
+ * lives; the content script has no business holding browsing preferences.
+ */
+function getIdentitiesForCurrentPage(): Promise<InlineIdentity[]> {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(
+        { type: "LIST_IDENTITIES_FOR_SITE", host: window.location.hostname },
+        (res: { type?: string; items?: InlineIdentity[] }) => {
+          if (
+            chrome.runtime.lastError ||
+            res?.type !== "LIST_IDENTITIES_FOR_SITE_RESULT"
+          ) {
+            resolve([]);
+            return;
+          }
+          resolve(res.items ?? []);
+        },
+      );
+    } catch {
+      // Extension context invalidated mid-navigation; no icons is the right
+      // outcome, not an exception into the page.
+      resolve([]);
+    }
+  });
 }
 
 // ── Save bar flow ────────────────────────────────
 
 async function handleCapture(captured: CapturedCredentials) {
-  if (await isExcludedSite()) return;
-  const never = await isNeverSave();
-  if (never) return;
+  if (await isExcludedSite()) {
+    recordOutcome("excluded", captured.username);
+    return;
+  }
+  if (await isNeverSave()) {
+    recordOutcome("never_save", captured.username);
+    return;
+  }
 
-  // ── Password-change auto-detect ─────────────────────────
-  // If the user filled credential X here and submitted with a different
-  // password, route through the v2.0.0 PATCH_SECRET_BLOCK endpoint to
-  // rotate the saved password — non-destructive, preserves all other
-  // fields (note, totp, url_match, primary, deprecated).
+  // Captures still waiting for a decision are not "existing logins" to
+  // update; they are the thing being decided.
+  const existing = (await checkExisting()).filter((c) => !c.captured);
+
+  // A credential filled on this page and submitted with a new password is
+  // an update of that credential, whether or not the site lookup found it.
   const lastFilled = getLastFilled();
   if (
     lastFilled &&
-    captured.username &&
-    lastFilled.credential.fields["username"] === captured.username &&
-    captured.password &&
-    captured.password !== lastFilled.filledPasswordValue
+    !existing.some(
+      (c) =>
+        c.pagePath === lastFilled.credential.pagePath &&
+        c.label === lastFilled.credential.label,
+    )
   ) {
-    const cred = lastFilled.credential;
-    showSaveBar({
-      username: captured.username,
-      password: captured.password,
-      url: captured.url,
-      existing: [cred],
-      onSave: () => rotatePassword(cred, captured.password),
-      onUpdate: (target) => rotatePassword(target, captured.password),
-      onNever: () => setNeverSave(),
-      onDismiss: () => movePendingToUnsaved(),
-    });
-    storePendingSave(captured);
-    return;
+    existing.unshift(lastFilled.credential);
   }
 
-  // Store in session storage so it persists across redirect/2FA
-  storePendingSave(captured);
-
-  // Check for existing credentials on this domain
-  const existing = await checkExisting();
-
-  // ── Suppress the bar for an unchanged, already-stored login ──────────
-  // If the submitted username+password EXACTLY matches a credential we
-  // already have, there is nothing to save or update — offering "Update"
-  // here is noise (and confusing: the user just logged in successfully with
-  // the stored value). Only fall through to the bar when the credential is
-  // genuinely new, or the username matches but the password differs (a real
-  // rotation the user should be prompted about).
+  // An unchanged, already-stored login needs nothing: no write, no bar.
   if (existing.some((c) => credentialMatches(c, captured))) {
     clearPendingSave();
+    recordOutcome("already_saved", captured.username);
     return;
   }
 
+  const handle = await captureLogin(captured);
+  if (!handle) {
+    recordOutcome("failed", captured.username);
+    return;
+  }
+  recordOutcome(handle.parked ? "parked" : "captured", captured.username, handle.pagePath);
+  storePendingSave(captured, handle.pagePath);
+
+  // If the site now says the password was wrong, the capture is not worth
+  // keeping. Only a rejection the site states plainly counts.
+  watchForRejection(() => {
+    dismissSaveBar();
+    void discardCapture(handle, captured);
+    recordOutcome("failed", captured.username);
+  });
+
+  presentCapture(captured, handle, existing);
+}
+
+/** The bar, wired the same way whether shown at submit or after a redirect. */
+function presentCapture(
+  captured: CapturedCredentials,
+  handle: CaptureHandle,
+  existing: Credential[],
+) {
   showSaveBar({
     username: captured.username,
     password: captured.password,
     url: captured.url,
     existing,
-    onSave: () => saveCredential(captured),
-    onUpdate: (cred) => updateCredential(captured, cred),
-    onNever: () => setNeverSave(),
-    onDismiss: () => {
-      // Don't delete — move to persistent unsaved queue so user can save later
-      movePendingToUnsaved();
+    parked: handle.parked,
+    onSave: () => confirmCapture(handle, captured),
+    onUpdate: (cred) => updateCredential(captured, cred, handle),
+    onNever: () => {
+      void discardCapture(handle, captured);
+      setNeverSave();
+    },
+    onDismiss: (reason) => {
+      // Closed by hand: stop asking on this site; the popup still lists it.
+      // Timed out: not answered yet, so the next page of the site asks again.
+      if (reason === "closed") parkPendingSave();
     },
   });
 }
@@ -382,8 +436,7 @@ async function handleCapture(captured: CapturedCredentials) {
  */
 function credentialMatches(cred: Credential, captured: CapturedCredentials): boolean {
   const f = cred.fields;
-  const storedUser =
-    f["username"] || f["user"] || f["login"] || f["email"] || "";
+  const storedUser = f["username"] || f["user"] || f["login"] || f["email"] || "";
   const storedPass = f["password"] || f["pass"] || "";
   // Password must match exactly (and be non-empty), and the usernames must
   // line up — treating "absent on both sides" as equal so a password-only
@@ -393,35 +446,7 @@ function credentialMatches(cred: Credential, captured: CapturedCredentials): boo
   return storedUser === (captured.username || "");
 }
 
-/**
- * Non-destructive password rotation via the v2.0.0 PATCH_SECRET_BLOCK
- * endpoint. Preserves every other field on the credential — note, totp,
- * url_match, primary, deprecated, custom fields all survive.
- */
-function rotatePassword(credential: Credential, newPassword: string): void {
-  const passwordKey = ["password", "pass"].find((k) => k in credential.fields) ?? "password";
-  safeSendMessage(
-    {
-      type: "PATCH_SECRET_BLOCK",
-      pagePath: credential.pagePath,
-      label: credential.label,
-      fields: { [passwordKey]: newPassword },
-    } as Message,
-    (response) => {
-      const res = response as { type?: string; success?: boolean; errorMessage?: string };
-      if (res?.type === "PATCH_SECRET_BLOCK_RESULT" && res.success) {
-        clearPendingSave();
-        dismissSaveBar();
-      } else {
-        // Surface the error as a banner — don't silently swallow.
-        const msg = res?.errorMessage ?? "password rotation failed";
-        dbg("rotatePassword failed:", msg);
-      }
-    },
-  );
-}
-
-/** Check for a pending save from a previous page (login redirect). */
+/** Bring the bar back after a redirect, for a capture not yet answered. */
 async function checkPendingSave() {
   const pending = await getPendingSave();
   if (!pending) return;
@@ -435,18 +460,19 @@ async function checkPendingSave() {
     return;
   }
 
-  const existing = await checkExisting();
-
-  showSaveBar({
-    username: pending.username,
-    password: pending.password,
-    url: pending.url,
+  const existing = (await checkExisting()).filter((c) => !c.captured);
+  const handle: CaptureHandle = { pagePath: pending.pagePath, parked: !pending.pagePath };
+  presentCapture(
+    {
+      username: pending.username,
+      password: pending.password,
+      url: pending.url,
+      domain: pending.domain,
+      isSignup: pending.isSignup,
+    },
+    handle,
     existing,
-    onSave: () => saveCredential(pending as CapturedCredentials),
-    onUpdate: (cred) => updateCredential(pending as CapturedCredentials, cred),
-    onNever: () => setNeverSave(),
-    onDismiss: () => movePendingToUnsaved(),
-  });
+  );
 }
 
 // ── DOM removal detection (SPA submission signal) ──
@@ -479,20 +505,38 @@ async function init() {
   // Bail early if extension context is already dead
   try {
     if (!chrome.runtime?.id) return;
-  } catch { return; }
+  } catch {
+    return;
+  }
 
   await loadDebugState();
   detectedFields = detectFields();
-  dbg("Detected fields:", detectedFields.length, detectedFields.map((f) => `${f.type}:${f.element.name || f.element.id || f.element.type}`));
+  dbg(
+    "Detected fields:",
+    detectedFields.length,
+    detectedFields.map(
+      (f) => `${f.type}:${f.element.name || f.element.id || f.element.type}`,
+    ),
+  );
 
   updateInlineIcons(detectedFields);
 
   // Watch for dynamic form additions (SPAs)
   observeForms((fields) => {
-    try { if (!chrome.runtime?.id) return; } catch { return; }
+    try {
+      if (!chrome.runtime?.id) return;
+    } catch {
+      return;
+    }
     detectedFields = fields;
     updateInlineIcons(fields);
   });
+
+  // Capturing what was typed, offering to save it, surfacing a pending save
+  // and filling on load all belong to the page the person is looking at. In
+  // an iframe they belonged to whoever embedded the frame, and the worker
+  // answered for the outer site.
+  if (window !== window.top) return;
 
   // Watch for ALL form submissions (login + signup)
   observeSignupForms((captured) => {
@@ -517,10 +561,10 @@ async function init() {
 }
 
 /** Per-credential URL matching policy, read from the secret block fields. */
-function matchPolicyOf(cred: Credential): "base_domain" | "host" | "exact" | "never" | undefined {
-  const raw = (cred.fields["url_match"] || cred.fields["url match"] || "").toLowerCase().trim();
-  if (raw === "never" || raw === "exact" || raw === "host" || raw === "base_domain") return raw;
-  return undefined;
+function matchPolicyOf(
+  cred: Credential,
+): "base_domain" | "host" | "exact" | "never" | undefined {
+  return urlMatchPolicyOf(cred.fields);
 }
 
 /** Auto-fill the first matching credential on page load (if enabled). */
@@ -529,7 +573,9 @@ async function autoFillOnLoad() {
   try {
     if (!chrome.runtime?.id) return;
     stored = await chrome.storage.local.get("claspt_config");
-  } catch { return; }
+  } catch {
+    return;
+  }
   const cfg = stored["claspt_config"];
   if (!cfg?.autoFillOnPageLoad) return;
   if (isExcludedDomain(window.location.hostname, cfg.excludedDomains ?? [])) return;
@@ -549,7 +595,8 @@ async function autoFillOnLoad() {
   // demands an exact-host or registrable-domain match against the credential's
   // saved URL. This is the blocking anti-phishing gate for auto-fill.
   const topMatch = credentials.find(
-    (c) => (c.score ?? 0) >= 100 && isAutofillSafe(window.location.href, c, matchPolicyOf(c)),
+    (c) =>
+      (c.score ?? 0) >= 100 && isAutofillSafe(window.location.href, c, matchPolicyOf(c)),
   );
   if (!topMatch) return;
 
@@ -565,9 +612,20 @@ try {
   if (chrome.runtime?.id) {
     chrome.runtime.onMessage.addListener(
       (
-        message: { type: string; credential?: Credential; text?: string; submit?: boolean },
+        // Widened by hand rather than using the Message union, which is what
+        // it was before: a message the popup sends and this file does not
+        // handle produces no error anywhere, which is how FILL_IDENTITY came
+        // to be sent for months with nothing listening.
+        message: {
+          type: string;
+          credential?: Credential;
+          text?: string;
+          submit?: boolean;
+          identity?: Record<string, string>;
+          pagePath?: string;
+        },
         _sender,
-        sendResponse
+        sendResponse,
       ) => {
         // Check context is still valid before processing
         if (!chrome.runtime?.id) return;
@@ -600,7 +658,11 @@ try {
             // keeps legitimate subdomains like accounts.google.com working.)
             if (isDomainMismatch(cred.url, window.location.hostname)) {
               let savedDomain = cred.url ?? "";
-              try { savedDomain = new URL(cred.url as string).hostname; } catch { /* keep raw */ }
+              try {
+                savedDomain = new URL(cred.url as string).hostname;
+              } catch {
+                /* keep raw */
+              }
               showPhishingWarning(savedDomain, window.location.hostname);
               sendResponse({ type: "FILL_RESULT", success: false });
               break;
@@ -635,9 +697,43 @@ try {
             return true;
           }
 
+          case "FILL_IDENTITY": {
+            // The popup has sent this since identities were added; nothing
+            // listened for it, so the Fill button did nothing.
+            if (window !== window.top) {
+              sendResponse({ type: "FILL_IDENTITY_RESULT", filled: 0 });
+              break;
+            }
+            if (!isFillableOrigin()) {
+              showInsecureOriginWarning(window.location.hostname);
+              sendResponse({ type: "FILL_IDENTITY_RESULT", filled: 0 });
+              break;
+            }
+            // Detect afresh rather than trusting a cached scan: address forms
+            // are commonly revealed a step into a checkout, after the last one.
+            const filled = fillIdentityFields(detectFields(), message.identity ?? {});
+            if (filled > 0 && message.pagePath) {
+              // Remember the choice for this site, so the next visit offers
+              // this identity first. The path is a reference, never a value.
+              chrome.runtime.sendMessage({
+                type: "REMEMBER_IDENTITY_FOR_SITE",
+                host: window.location.hostname,
+                pagePath: message.pagePath,
+              });
+            }
+            sendResponse({ type: "FILL_IDENTITY_RESULT", filled });
+            break;
+          }
+
           case "CLIPBOARD_WRITE": {
             if (message.text !== undefined) {
-              navigator.clipboard.writeText(message.text).catch(() => {});
+              // Say whether it worked, so the worker can try again elsewhere
+              // when this document is not focused.
+              navigator.clipboard
+                .writeText(message.text)
+                .then(() => sendResponse({ type: "CLIPBOARD_WRITTEN", ok: true }))
+                .catch(() => sendResponse({ type: "CLIPBOARD_WRITTEN", ok: false }));
+              return true;
             }
             break;
           }
@@ -649,10 +745,13 @@ try {
             const target = lastFocusedInput;
             if (target && document.contains(target)) {
               const setter = Object.getOwnPropertyDescriptor(
-                target.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
-                "value"
+                target.tagName === "TEXTAREA"
+                  ? HTMLTextAreaElement.prototype
+                  : HTMLInputElement.prototype,
+                "value",
               )?.set;
-              if (setter) setter.call(target, value); else target.value = value;
+              if (setter) setter.call(target, value);
+              else target.value = value;
               target.dispatchEvent(new Event("input", { bubbles: true }));
               target.dispatchEvent(new Event("change", { bubbles: true }));
               target.focus();
@@ -661,7 +760,7 @@ try {
             break;
           }
         }
-      }
+      },
     );
   }
 } catch {
@@ -672,6 +771,7 @@ try {
 window.addEventListener("beforeunload", () => {
   try {
     removeInlineIcons();
+    removeIdentityIcons();
     dismissSaveBar();
   } catch {
     // Context may be invalidated
@@ -681,7 +781,14 @@ window.addEventListener("beforeunload", () => {
 // Run on load — wrapped to catch any initialization errors from dead context
 try {
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => { try { init(); } catch {} });
+    document.addEventListener("DOMContentLoaded", () => {
+      try {
+        init();
+      } catch (e) {
+        // A failed start must not take the page down, but silence hid it.
+        console.warn("[Claspt] content script failed to start", e);
+      }
+    });
   } else {
     init();
   }
@@ -709,7 +816,9 @@ function submitFilledForm(fields: DetectedField[]): void {
         form.requestSubmit();
         return;
       }
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
 
     const submitBtn = form.querySelector<HTMLButtonElement | HTMLInputElement>(
       'button[type="submit"], input[type="submit"], button:not([type])',
@@ -723,7 +832,13 @@ function submitFilledForm(fields: DetectedField[]): void {
   // Fallback: synthesize Enter on the last filled field
   for (const evType of ["keydown", "keypress", "keyup"] as const) {
     lastField.dispatchEvent(
-      new KeyboardEvent(evType, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }),
+      new KeyboardEvent(evType, {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+      }),
     );
   }
 }

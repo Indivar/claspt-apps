@@ -46,8 +46,29 @@ pub fn export_vault_complete(
 ) -> Result<ExportResult, PageError> {
     let vault_dir = get_vault_dir(&state)?;
     let master_key = get_master_key(&state)?;
+    write_complete_export(&vault_dir, &master_key, file_path, password)
+}
 
-    let out_file = std::fs::File::create(&file_path)?;
+/// Total bytes a vault export archive may unpack to on import. Well above
+/// any real vault of markdown, and a ceiling for a crafted archive that
+/// would otherwise fill the disk.
+const MAX_IMPORT_EXTRACTED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The whole vault, decrypted, as a zip at `file_path`.
+///
+/// Split from the command so it can be tested. The destination is refused
+/// inside the vault for the same reason the secrets export refuses it: git
+/// stages everything, so a plaintext archive saved there is committed within
+/// seconds and carried by sync, and the file is created owner-only rather
+/// than at whatever the umask allows.
+fn write_complete_export(
+    vault_dir: &Path,
+    master_key: &[u8],
+    file_path: String,
+    password: Option<String>,
+) -> Result<ExportResult, PageError> {
+    reject_destination_inside_vault(vault_dir, &file_path)?;
+    let out_file = claspt_core::fs_perms::create_owner_only(Path::new(&file_path))?;
     let mut zip = zip::ZipWriter::new(out_file);
 
     let has_password = password.as_ref().is_some_and(|p| !p.is_empty());
@@ -67,15 +88,15 @@ pub fn export_vault_complete(
     let mut pages_count = 0usize;
     let mut secrets_count = 0usize;
 
-    crud::walk_vault_pages(&vault_dir, |rel_path, meta, content| {
+    crud::walk_vault_pages(vault_dir, |rel_path, meta, content| {
         // Exports must always be plaintext-portable. Use the _for_export
         // variants that replace undecryptable blocks with a visible
         // placeholder instead of leaking `enc:v1:` ciphertext into the zip.
         let decrypted = if meta.encrypted {
-            let body = secret::decrypt_full_body_for_export(&content, &master_key);
-            secret::decrypt_secrets_for_export(&body, &master_key).unwrap_or(body)
+            let body = secret::decrypt_full_body_for_export(&content, master_key);
+            secret::decrypt_secrets_for_export(&body, master_key).unwrap_or(body)
         } else {
-            secret::decrypt_secrets_for_export(&content, &master_key)
+            secret::decrypt_secrets_for_export(&content, master_key)
                 .unwrap_or_else(|_| content.clone())
         };
 
@@ -225,7 +246,8 @@ fn extract_raw_secret_pairs(
     content: &str,
 ) -> Vec<(String, String, String, String)> {
     let mut entries = Vec::new();
-    let mut in_code_fence = false;
+    // The one fence rule every reader shares; this loop had its own toggle.
+    let mut fence = secret::FenceTracker::new();
     let mut in_secret = false;
     let mut current_label = String::new();
     let mut current_value = String::new();
@@ -233,16 +255,15 @@ fn extract_raw_secret_pairs(
     for line in content.lines() {
         let trimmed = line.trim();
 
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             continue;
         }
-        if in_code_fence {
+        if fence.is_open() {
             continue;
         }
 
         if trimmed.starts_with(":::secret[") {
-            if let Some(label) = parse_label(trimmed) {
+            if let Some(label) = secret::parse_secret_open(trimmed) {
                 in_secret = true;
                 current_label = label;
                 current_value.clear();
@@ -338,30 +359,6 @@ fn is_common_key(key: &str) -> bool {
     )
 }
 
-/// Parse label from `:::secret[Label]` line.
-fn parse_label(line: &str) -> Option<String> {
-    let after = line.trim().strip_prefix(":::secret[")?;
-    let mut depth = 0i32;
-    let chars: Vec<char> = after.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == ']' {
-            i += 2;
-            continue;
-        }
-        match chars[i] {
-            '[' => depth += 1,
-            ']' if depth == 0 => {
-                return Some(after[..i].replace("\\]", "]"));
-            }
-            ']' => depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
 /// Neutralize spreadsheet formula injection (CSV injection): a field that
 /// begins with `=`, `+`, `-`, `@`, TAB or CR is interpreted as a formula by
 /// Excel/Sheets/LibreOffice and can exfiltrate data or run commands when the
@@ -451,7 +448,10 @@ fn canonicalize_lenient(target: &Path) -> std::path::PathBuf {
 ///
 /// Compares canonical paths so a symlink or a `..` component cannot walk back
 /// in. A destination that does not exist yet is resolved through its parent.
-fn reject_destination_inside_vault(vault_dir: &Path, file_path: &str) -> Result<(), PageError> {
+pub(crate) fn reject_destination_inside_vault(
+    vault_dir: &Path,
+    file_path: &str,
+) -> Result<(), PageError> {
     let target = Path::new(file_path);
     let resolved = canonicalize_lenient(target);
 
@@ -509,12 +509,21 @@ pub fn import_from_zip(
     let vault_dir = get_vault_dir(&state)?;
     let master_key = get_master_key(&state)?;
 
-    // Create a temp directory for extraction
-    let temp_dir = std::env::temp_dir().join(format!("claspt-import-{}", std::process::id()));
-    if temp_dir.exists() {
-        std::fs::remove_dir_all(&temp_dir)?;
-    }
-    std::fs::create_dir_all(&temp_dir)?;
+    // The archive holds the vault decrypted, so it is unpacked under
+    // `.securenotes/`, which is owner-only, git-ignored and on the vault's own
+    // filesystem, into a directory with an unguessable name that is removed
+    // when this function returns. The system temp directory is shared on
+    // Linux and its name here used to be the process id: another local
+    // account could read the pages during the import, or create the
+    // directory first and own every file written into it.
+    let scratch = vault_dir.join(".securenotes").join("tmp");
+    std::fs::create_dir_all(&scratch)?;
+    claspt_core::fs_perms::restrict_to_owner(&scratch)?;
+    let temp = tempfile::Builder::new()
+        .prefix("import-")
+        .tempdir_in(&scratch)?;
+    let temp_dir = temp.path().to_path_buf();
+    let mut extracted_bytes: u64 = 0;
 
     // Extract zip
     let zip_file = std::fs::File::open(&zip_path)?;
@@ -567,12 +576,30 @@ pub fn import_from_zip(
             continue;
         }
 
+        // A zip can declare a small size and inflate to a large one, so the
+        // budget is enforced on the bytes actually written, not the header.
+        let remaining = MAX_IMPORT_EXTRACTED_BYTES.saturating_sub(extracted_bytes);
+        if file.size() > remaining {
+            return Err(PageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("archive exceeds the {MAX_IMPORT_EXTRACTED_BYTES} byte import limit"),
+            )));
+        }
+
         // Create parent dirs and extract file
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut out_file = std::fs::File::create(&out_path)?;
-        std::io::copy(&mut file, &mut out_file)?;
+        let mut out_file = claspt_core::fs_perms::create_owner_only(&out_path)?;
+        let mut limited = std::io::Read::take(&mut file, remaining + 1);
+        let written = std::io::copy(&mut limited, &mut out_file)?;
+        if written > remaining {
+            return Err(PageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("archive exceeds the {MAX_IMPORT_EXTRACTED_BYTES} byte import limit"),
+            )));
+        }
+        extracted_bytes += written;
     }
 
     // Generate target folder name with today's date
@@ -587,8 +614,8 @@ pub fn import_from_zip(
         &target_folder,
     )?;
 
-    // Clean up temp directory
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // The extraction directory is removed when `temp` drops, on every path.
+    drop(temp);
 
     Ok(ImportZipResult {
         imported: result.imported,
@@ -643,6 +670,44 @@ mod tests {
         assert!(csv.contains("hunter2"));
     }
 
+    /// The full-vault export used to skip both the destination check and the
+    /// permission bits that the secrets export applied; "backup.zip" saved
+    /// into the vault was committed as plaintext within seconds.
+    #[test]
+    fn complete_export_refuses_the_vault_and_writes_owner_only() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("Claspt");
+        std::fs::create_dir_all(vault.join("general")).unwrap();
+        let key = [0x11u8; 32];
+
+        let inside = vault.join("backup.zip");
+        assert!(
+            write_complete_export(&vault, &key, inside.to_string_lossy().into_owned(), None)
+                .is_err(),
+            "an export inside the vault must be refused"
+        );
+        assert!(
+            !inside.exists(),
+            "the refused export must not have created a file"
+        );
+
+        let outside = dir.path().join("backup.zip");
+        let result =
+            write_complete_export(&vault, &key, outside.to_string_lossy().into_owned(), None)
+                .expect("export outside the vault");
+        assert_eq!(result.file_path, outside.to_string_lossy());
+        assert!(outside.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "export must be readable by its owner only, got {mode:o}"
+            );
+        }
+    }
+
     /// Exporting into the vault would put a cleartext copy of every secret where
     /// git stages everything and sync uploads it.
     #[test]
@@ -686,5 +751,19 @@ mod tests {
                 |e| panic!("export to {} should be allowed: {e}", candidate.display()),
             );
         }
+    }
+
+    #[test]
+    fn export_reads_every_label_the_writer_can_produce() {
+        // A third parser here understood only `\]` and lost any label with a
+        // bracket or a trailing backslash; the export silently under-counted.
+        let content = format!(
+            ":::secret[{}]\npassword: one\n:::\n\n:::secret[{}]\npassword: two\n:::\n\n```\n```bash\n```\n\n:::secret[Third]\npassword: three\n:::\n",
+            crate::pages::secret::escape_label("a[b]c"),
+            crate::pages::secret::escape_label("C:\\"),
+        );
+        let rows = extract_raw_secret_pairs("Title", "general", &content);
+        let labels: Vec<&str> = rows.iter().map(|r| r.2.as_str()).collect();
+        assert_eq!(labels, vec!["a[b]c", "C:\\", "Third"], "{rows:?}");
     }
 }

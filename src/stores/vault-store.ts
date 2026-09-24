@@ -56,6 +56,9 @@ interface VaultStore {
   biometricFailures: number;
   /** Whether the user has unlocked with password this session (for reauth mode). */
   hasUnlockedWithPassword: boolean;
+  /** The tab the unlock screen opens on next, set by a flow that locks the
+   *  vault to send the owner somewhere specific (Restore from account). */
+  requestedUnlockMode: "unlock" | "create" | "restore" | null;
 
   /** Create a brand-new vault; returns the one-time recovery key to display. */
   createVault: (
@@ -77,11 +80,11 @@ interface VaultStore {
   clearError: () => void;
   clearRecoveryKey: () => void;
   /** Probe platform biometric support and sync the current biometric mode. */
-  checkBiometric: () => Promise<void>;
+  checkBiometric: (vaultDir?: string) => Promise<void>;
   /** Unlock via biometric — UI unlock if key already resident, else full unlock. */
   unlockWithBiometric: (vaultDir: string) => Promise<boolean>;
   /** Enroll or disable biometric unlock for the given mode. */
-  toggleBiometric: (vaultDir: string, mode?: string) => Promise<boolean>;
+  toggleBiometric: (mode?: string) => Promise<boolean>;
   /** Recover access with the recovery key and set a new master password. */
   recoverWithKey: (
     recoveryKey: string,
@@ -103,6 +106,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   biometricMode: "disabled",
   biometricFailures: 0,
   hasUnlockedWithPassword: false,
+  requestedUnlockMode: null,
 
   createVault: async (password, vaultDir) => {
     set({ loading: true, error: null });
@@ -215,7 +219,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     }
   },
 
-  checkBiometric: async () => {
+  checkBiometric: async (vaultDir?: string) => {
     try {
       const available = await cmd.biometricAvailable();
       let mode = get().biometricMode; // preserve existing mode (e.g. after auto-lock)
@@ -223,10 +227,15 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         try {
           mode = await cmd.biometricStatus();
         } catch {
-          // Config not readable before unlock — check keychain for enrollment
-          if (mode === "disabled") {
-            const enrolled = await cmd.biometricEnrolled();
-            if (enrolled) mode = "enabled";
+          // Config not readable before unlock — the keychain decides instead.
+          // Entries are scoped per vault, so this needs to know which vault
+          // is on screen; with no folder chosen yet there is nothing to look
+          // up and the last known mode stands. A key that is gone (removed
+          // by the app because it belonged to another vault) means off.
+          if (vaultDir) {
+            const enrolled = await cmd.biometricEnrolled(vaultDir);
+            if (!enrolled) mode = "disabled";
+            else if (mode === "disabled") mode = "enabled";
           }
         }
       } else {
@@ -273,11 +282,15 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       vaultLog.warn("Biometric unlock failed", e);
       const failures = get().biometricFailures + 1;
       set({ error: errorMessage(e), loading: false, biometricFailures: failures });
+      // The app may have switched biometrics off during the attempt (the
+      // keychain held another vault's key). Ask again so the button goes
+      // and the message on screen is the only way left to unlock.
+      await get().checkBiometric(vaultDir);
       return false;
     }
   },
 
-  toggleBiometric: async (vaultDir, mode) => {
+  toggleBiometric: async (mode) => {
     const targetMode = mode ?? "disabled";
     try {
       if (targetMode === "disabled") {
@@ -286,7 +299,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         vaultLog.info("Biometric disabled");
       } else {
         // Both "reauth" and "primary" enroll the same way (store key in keychain)
-        await cmd.biometricEnroll(vaultDir, targetMode);
+        await cmd.biometricEnroll(targetMode);
         set({ biometricMode: targetMode });
         vaultLog.info(`Biometric set to ${targetMode}`);
       }

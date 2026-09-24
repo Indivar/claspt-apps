@@ -19,7 +19,7 @@ import { GenerateButton } from "./GenerateButton";
 
 /** Diceware-style passphrase generator tab (EFF or BIP-39 word lists). */
 export function PassphraseTab({ onUseValue }: { onUseValue?: (v: string) => void }) {
-  const [wordCount, setWordCount] = useState(5);
+  const [wordCount, setWordCount] = useState(6);
   const [separator, setSeparator] = useState("-");
   const [capitalize, setCapitalize] = useState(true);
   const [includeNumber, setIncludeNumber] = useState(false);

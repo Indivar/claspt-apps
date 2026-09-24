@@ -30,20 +30,20 @@ regexes = [
   '''^C9B3746F410CE298$''',
 ]
 paths = [
+  # A vault written by release 3.0.6, kept verbatim to prove that older vaults
+  # still open (src-tauri/src/vault/old_vault_tests.rs). Its config carries a
+  # hash of its own master key, which the generic rule reads as an API key.
+  # The vault has never held anything, and its password is printed in the
+  # README beside it; changing the file would defeat the test.
+  '''src-tauri/tests/fixtures/vault-3\.0\.6/''',
   # Ignored by git and never checked in; listed so a local `gitleaks dir`
   # run is clean, not because their contents are acceptable.
-  '''mobile/ios/Pods/''',
-  '''mobile/ios/Podfile\.lock''',
-  '''mobile/\.android-secrets/''',
-  '''server/data/''',
-  '''docs/deployment/infrastructure-reference\.md''',
   # Build output and dependencies: not ours, and enormous. CI checks out a
   # clean tree, so this only matters for local runs.
   '''(^|/)node_modules/''',
   '''(^|/)target/''',
   '''(^|/)dist/''',
   '''(^|/)\.git/''',
-  '''mobile/(ios|android)/build/''',
   # Sample vault pages shipped as documentation. Values are the vendors' own
   # documented examples (AWS, Stripe, Cloudflare) and an obviously fake key.
   '''docs/examples/''',
@@ -52,7 +52,6 @@ paths = [
   '''src-tauri/src/local_api/routes\.rs''',
   '''src-tauri/src/mcp_install\.rs''',
   '''browser-extension/src/__tests__/.*''',
-  '''mobile/src/__tests__/.*''',
   '''src/__tests__/.*''',
   '''package-lock\.json''',
   '''Cargo\.lock''',

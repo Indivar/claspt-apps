@@ -31,7 +31,7 @@ use super::secret;
 
 /// Atomically write data to a file using temp-file + rename.
 /// Prevents data corruption if the process crashes mid-write.
-fn atomic_write(path: &Path, data: &[u8]) -> Result<(), PageError> {
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<(), PageError> {
     let tmp_path = path.with_extension("tmp");
     if let Err(e) = std::fs::write(&tmp_path, data) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -45,6 +45,28 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), PageError> {
 }
 
 /// Join a relative path to a base directory, rejecting traversal attempts.
+/// The on-disk path of a page named by a vault-relative path, or an error
+/// for anything that is not a page.
+///
+/// `safe_join` keeps a path inside the vault; it does not care what the path
+/// names. That let the local API's `DELETE /api/pages/{path}` reach
+/// `.securenotes`, `.git`, or a whole folder, because `trash::delete` removes
+/// directories as happily as files, and a notes-scope token was enough. A
+/// page is a `.md` file whose every segment is an ordinary folder or file
+/// name, so that is what this insists on, before the filesystem is consulted.
+pub(crate) fn safe_page_path(vault_dir: &Path, rel_path: &str) -> Result<PathBuf, PageError> {
+    let hidden = rel_path
+        .split(['/', '\\'])
+        .any(|segment| segment.starts_with('.'));
+    let is_markdown = Path::new(rel_path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if hidden || !is_markdown {
+        return Err(PageError::NotFound(rel_path.to_string()));
+    }
+    safe_join(vault_dir, rel_path)
+}
+
 pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, PageError> {
     // Fast rejection: no `..` components allowed
     if rel.split(['/', '\\']).any(|c| c == "..") {
@@ -175,7 +197,7 @@ pub fn create_page(
 
 /// Read a page from disk by relative path.
 pub fn read_page(vault_dir: &Path, rel_path: &str) -> Result<Page, PageError> {
-    let file_path = safe_join(vault_dir, rel_path)?;
+    let file_path = safe_page_path(vault_dir, rel_path)?;
     if !file_path.exists() {
         return Err(PageError::NotFound(rel_path.to_string()));
     }
@@ -192,7 +214,7 @@ pub fn read_page(vault_dir: &Path, rel_path: &str) -> Result<Page, PageError> {
 
 /// Update a page's content and updated_at timestamp.
 pub fn update_page(vault_dir: &Path, rel_path: &str, content: &str) -> Result<Page, PageError> {
-    let file_path = safe_join(vault_dir, rel_path)?;
+    let file_path = safe_page_path(vault_dir, rel_path)?;
     if !file_path.exists() {
         return Err(PageError::NotFound(rel_path.to_string()));
     }
@@ -224,7 +246,7 @@ pub fn update_page_with_meta<F>(
 where
     F: FnOnce(&mut PageMeta),
 {
-    let file_path = safe_join(vault_dir, rel_path)?;
+    let file_path = safe_page_path(vault_dir, rel_path)?;
     if !file_path.exists() {
         return Err(PageError::NotFound(rel_path.to_string()));
     }
@@ -245,25 +267,33 @@ where
 }
 
 /// Delete a page by moving it to the system trash.
-pub fn delete_page(vault_dir: &Path, rel_path: &str) -> Result<(), PageError> {
-    let file_path = safe_join(vault_dir, rel_path)?;
-    if !file_path.exists() {
+pub fn delete_page(
+    vault_dir: &Path,
+    rel_path: &str,
+) -> Result<super::trash::TrashEntry, PageError> {
+    super::trash::move_to_trash(vault_dir, rel_path, super::trash::retention_for(vault_dir))
+}
+
+/// Remove a page without passing through the trash: for a memory whose own
+/// retention has run out, which the trash would only hold a second time.
+pub fn remove_page_permanently(vault_dir: &Path, rel_path: &str) -> Result<(), PageError> {
+    let file_path = safe_page_path(vault_dir, rel_path)?;
+    if !file_path.is_file() {
         return Err(PageError::NotFound(rel_path.to_string()));
     }
-
-    trash::delete(&file_path).map_err(|e| PageError::Trash(e.to_string()))?;
+    std::fs::remove_file(&file_path)?;
     Ok(())
 }
 
-/// Delete multiple pages permanently (not trash) for fast bulk operations.
-/// Uses direct filesystem removal to avoid macOS Finder's slow trash API.
-/// The vault is git-tracked, so files can be recovered from git history.
+/// Delete many pages in one go. Each goes to the vault's trash like a
+/// single delete; a page that is not there is skipped, not an error.
 pub fn delete_pages_bulk(vault_dir: &Path, rel_paths: &[String]) -> Result<usize, PageError> {
+    let retention = super::trash::retention_for(vault_dir);
     let mut count = 0;
     for rel_path in rel_paths {
-        if let Ok(fp) = safe_join(vault_dir, rel_path) {
-            if fp.exists() {
-                std::fs::remove_file(&fp)?;
+        if let Ok(fp) = safe_page_path(vault_dir, rel_path) {
+            if fp.is_file() {
+                super::trash::move_to_trash(vault_dir, rel_path, retention)?;
                 count += 1;
             }
         }
@@ -426,7 +456,7 @@ pub fn list_secrets(vault_dir: &Path) -> Result<Vec<SecretSummary>, PageError> {
     })?;
 
     // Sort by label alphabetically
-    secrets.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    secrets.sort_by_key(|s| s.label.to_lowercase());
     Ok(secrets)
 }
 
@@ -476,7 +506,7 @@ pub fn move_page(vault_dir: &Path, rel_path: &str, new_folder: &str) -> Result<P
 }
 
 /// Validate a folder path (possibly nested, e.g. `"work/aws/production"`).
-fn validate_folder_path(path: &str) -> Result<(), PageError> {
+pub(crate) fn validate_folder_path(path: &str) -> Result<(), PageError> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err(PageError::InvalidFolderName("path cannot be empty".into()));
@@ -631,14 +661,11 @@ pub fn delete_folder(vault_dir: &Path, name: &str, action: &str) -> Result<(), P
     }
 
     if action == "delete_pages" {
-        // Bulk delete: remove files directly instead of sending each to Trash.
-        // The folder tree is removed by remove_dir_all below, so Trash is unnecessary
-        // and would be extremely slow for hundreds of files (each triggers macOS Finder).
+        // Every page of the folder goes to the vault's trash, where it can
+        // be restored (into a recreated folder) for the retention period.
+        let retention = super::trash::retention_for(vault_dir);
         for rel_path in &page_paths {
-            let file_path = safe_join(vault_dir, rel_path)?;
-            if file_path.exists() {
-                std::fs::remove_file(&file_path)?;
-            }
+            super::trash::move_to_trash(vault_dir, rel_path, retention)?;
         }
     } else if let Some(target) = action.strip_prefix("move_pages:") {
         validate_folder_path(target)?;
@@ -1185,5 +1212,54 @@ mod tests {
             create_page(&vault, "Fine", folder, "body", false)
                 .unwrap_or_else(|e| panic!("creating a page in {folder:?} should work: {e}"));
         }
+    }
+
+    #[test]
+    fn page_operations_refuse_anything_that_is_not_a_page() {
+        // The local API once let DELETE /api/pages/.securenotes reach the
+        // trash, taking the key file, config and client registry with it.
+        let (_tmp, vault) = setup_vault();
+        std::fs::create_dir_all(vault.join(".securenotes")).unwrap();
+        std::fs::write(vault.join(".securenotes").join("config.json"), "{}").unwrap();
+        std::fs::create_dir_all(vault.join("general")).unwrap();
+        std::fs::write(vault.join("general").join("notes.txt"), "plain").unwrap();
+
+        for target in [
+            ".securenotes",
+            ".securenotes/config.json",
+            ".git",
+            "general",
+            "general/notes.txt",
+            ".",
+        ] {
+            assert!(
+                delete_page(&vault, target).is_err(),
+                "delete accepted {target}"
+            );
+            assert!(read_page(&vault, target).is_err(), "read accepted {target}");
+            assert!(
+                update_page(&vault, target, "x").is_err(),
+                "update accepted {target}"
+            );
+        }
+        assert_eq!(
+            delete_pages_bulk(&vault, &[".securenotes".into(), "general".into()]).unwrap(),
+            0
+        );
+
+        assert!(
+            vault.join(".securenotes").join("config.json").is_file(),
+            "internals were touched"
+        );
+        assert!(vault.join("general").join("notes.txt").is_file());
+        assert!(vault.join("general").is_dir());
+    }
+
+    #[test]
+    fn a_directory_named_like_a_page_is_not_deleted() {
+        let (_tmp, vault) = setup_vault();
+        std::fs::create_dir_all(vault.join("general").join("trap.md")).unwrap();
+        assert!(delete_page(&vault, "general/trap.md").is_err());
+        assert!(vault.join("general").join("trap.md").is_dir());
     }
 }

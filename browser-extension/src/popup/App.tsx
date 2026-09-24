@@ -2,8 +2,14 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { ConnectionState, Credential, ExtensionConfig, Message } from "@/shared/types";
+import type {
+  ConnectionState,
+  Credential,
+  ExtensionConfig,
+  Message,
+} from "@/shared/types";
 import { DEFAULT_CONFIG } from "@/shared/types";
+import { connectionFromStatus } from "./connection";
 import { STORAGE_KEY_CONFIG, STORAGE_KEY_POPUP_STATE } from "@/shared/constants";
 import { detectReusedPasswords, type ReusedReport } from "@/shared/reused";
 import { credKey, markUsed } from "@/shared/cred-state";
@@ -18,8 +24,10 @@ import { EmptyState } from "./components/EmptyState";
 import { FilterBar } from "./components/FilterBar";
 import { QuickAddForm } from "./components/QuickAddForm";
 import { IdentityTab } from "./components/IdentityTab";
-import { UnsavedCredentials } from "./components/UnsavedCredentials";
+import { WaitingToSave } from "./components/WaitingToSave";
+import { CaptureNote } from "./components/CaptureNote";
 import { RecentlyFilled } from "./components/RecentlyFilled";
+import { PasskeyNotice } from "./components/PasskeyNotice";
 import { Onboarding } from "./components/Onboarding";
 import { PermissionPrompt } from "./components/PermissionPrompt";
 
@@ -41,18 +49,24 @@ export function App() {
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [allCredentials, setAllCredentials] = useState<Credential[]>([]);
-  const [reusedReport, setReusedReport] = useState<ReusedReport | null>(null);
+  const [reusedReportState, setReusedReportState] = useState<ReusedReport | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
 
-  // Recompute reused-password report when the vault snapshot changes.
+  // Recompute reused-password report when the vault snapshot changes. The
+  // report is only meaningful for the snapshot it was computed from, so an
+  // empty snapshot reads as "no report" rather than clearing state in the
+  // effect.
   useEffect(() => {
-    if (allCredentials.length === 0) { setReusedReport(null); return; }
+    if (allCredentials.length === 0) return;
     let cancelled = false;
     detectReusedPasswords(allCredentials).then((r) => {
-      if (!cancelled) setReusedReport(r);
+      if (!cancelled) setReusedReportState(r);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [allCredentials]);
+  const reusedReport = allCredentials.length === 0 ? null : reusedReportState;
   const listRef = useRef<HTMLDivElement>(null);
 
   // Restore last active tab from persistent state
@@ -68,35 +82,62 @@ export function App() {
     chrome.storage.local.set({ [STORAGE_KEY_POPUP_STATE]: { activeTab } });
   }, [activeTab]);
 
+  const tryPairing = useCallback((config: ExtensionConfig) => {
+    chrome.runtime.sendMessage({ type: "PAIR_WITH_APP" } as Message, (res: Message) => {
+      if (res?.type === "PAIR_RESULT" && res.ok) {
+        setConnection("connected");
+        setShowOnboarding(false);
+        return;
+      }
+      if (res?.type === "PAIR_RESULT" && res.reason === "desktop-too-old") {
+        setConnection("desktop_too_old");
+        return;
+      }
+      if (!config.onboardingComplete) setShowOnboarding(true);
+    });
+  }, []);
+
   // Check onboarding + status on mount
   useEffect(() => {
     chrome.storage.local.get(STORAGE_KEY_CONFIG, (result) => {
-      const config: ExtensionConfig = { ...DEFAULT_CONFIG, ...result[STORAGE_KEY_CONFIG] };
-      if (config.token) return;
+      const config: ExtensionConfig = {
+        ...DEFAULT_CONFIG,
+        ...result[STORAGE_KEY_CONFIG],
+      };
+      // A stored token used to end the matter for good. If that token was
+      // wrong, revoked, or typed by hand into the wrong box, pairing could
+      // never run again and the extension stayed broken with no way back
+      // except clearing storage. A token that still works short-circuits
+      // here; one that does not falls through to pairing like a fresh
+      // install would.
+      if (config.token) {
+        chrome.runtime.sendMessage(
+          { type: "GET_STATUS" } as Message,
+          (status: Message) => {
+            // Retrying costs nothing when the token is fine: PAIR_WITH_APP only
+            // succeeds while the app has a pairing window open, and otherwise
+            // fails quietly. So the test is simply "did the token work", and a
+            // locked vault or a closed app leads to a no-op rather than harm.
+            const connected = status?.type === "STATUS_RESULT" && status.connected;
+            if (!connected) tryPairing(config);
+          },
+        );
+        return;
+      }
+      tryPairing(config);
 
       // No token yet. Try pairing before showing the onboarding screen: if the
       // user has just pressed Connect in the desktop app, its pairing window is
       // open and this succeeds silently — which is the whole point of the
       // handshake. Copying a token by hand is the fallback, not the first move.
-      chrome.runtime.sendMessage({ type: "PAIR_WITH_APP" } as Message, (res: Message) => {
-        if (res?.type === "PAIR_RESULT" && res.ok) {
-          setConnection("connected");
-          setShowOnboarding(false);
-          return;
-        }
-        if (!config.onboardingComplete) setShowOnboarding(true);
-      });
     });
 
     const pollStatus = () => {
       chrome.runtime.sendMessage({ type: "GET_STATUS" } as Message, (res: Message) => {
         if (res?.type === "STATUS_RESULT") {
-          if (res.permissionNeeded) {
-            setConnection("permission_needed");
-          } else {
-            setConnection(res.connected ? "connected" : res.vaultUnlocked ? "vault_locked" : "disconnected");
-          }
-          setVersion(res.version); setVaultSyncVersion(res.vaultSyncVersion);
+          setConnection(connectionFromStatus(res));
+          setVersion(res.version);
+          setVaultSyncVersion(res.vaultSyncVersion);
           setPlan(res.plan);
         }
         setLoading(false);
@@ -107,7 +148,9 @@ export function App() {
     pollStatus();
     const id = setInterval(pollStatus, 10_000);
     return () => clearInterval(id);
-  }, []);
+    // tryPairing is stable (useCallback with no deps); listed so the mount
+    // effect does not silently capture a stale one if that ever changes.
+  }, [tryPairing]);
 
   // Load credentials for current tab
   useEffect(() => {
@@ -120,7 +163,11 @@ export function App() {
       // Extract domain from real web pages only
       let domain = "";
       if (tabUrl.startsWith("http://") || tabUrl.startsWith("https://")) {
-        try { domain = new URL(tabUrl).hostname; } catch { /* ignore */ }
+        try {
+          domain = new URL(tabUrl).hostname;
+        } catch {
+          /* ignore */
+        }
       }
       setCurrentDomain(domain);
 
@@ -137,11 +184,11 @@ export function App() {
                   { type: "SEARCH_CREDENTIALS", query: "*" } as Message,
                   (r: Message) => {
                     if (r?.type === "SEARCH_RESULT") setCredentials(r.credentials);
-                  }
+                  },
                 );
               }
             }
-          }
+          },
         );
       } else {
         // Not a web page — show all credentials
@@ -154,7 +201,7 @@ export function App() {
       { type: "SEARCH_CREDENTIALS", query: "*" } as Message,
       (res: Message) => {
         if (res?.type === "SEARCH_RESULT") setAllCredentials(res.credentials);
-      }
+      },
     );
   }, [connection]);
 
@@ -172,7 +219,7 @@ export function App() {
             if (res?.type === "CREDENTIALS_RESULT") {
               setCredentials(res.credentials);
             }
-          }
+          },
         );
       });
       return;
@@ -184,7 +231,7 @@ export function App() {
         if (res?.type === "SEARCH_RESULT") {
           setCredentials(res.credentials);
         }
-      }
+      },
     );
   }, []);
 
@@ -209,7 +256,9 @@ export function App() {
         ta.select();
         ok = document.execCommand("copy");
         document.body.removeChild(ta);
-      } catch { /* give up */ }
+      } catch {
+        /* give up */
+      }
     }
     if (ok) {
       chrome.runtime.sendMessage({ type: "COPY_TO_CLIPBOARD_SCHEDULE_CLEAR" } as Message);
@@ -218,19 +267,22 @@ export function App() {
     }
   }, []);
 
-  const handleFill = useCallback((credential: Credential, opts?: { submit?: boolean }) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tab = tabs[0];
-      if (!tab?.id) return;
-      chrome.tabs.sendMessage(tab.id, {
-        type: "FILL_CREDENTIAL",
-        credential,
-        submit: opts?.submit === true,
+  const handleFill = useCallback(
+    (credential: Credential, opts?: { submit?: boolean }) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs[0];
+        if (!tab?.id) return;
+        chrome.tabs.sendMessage(tab.id, {
+          type: "FILL_CREDENTIAL",
+          credential,
+          submit: opts?.submit === true,
+        });
+        void markUsed(credKey(credential.pagePath, credential.label));
+        window.close();
       });
-      void markUsed(credKey(credential.pagePath, credential.label));
-      window.close();
-    });
-  }, []);
+    },
+    [],
+  );
 
   const handleTestConnection = useCallback(async (): Promise<boolean> => {
     return new Promise((resolve) => {
@@ -246,32 +298,58 @@ export function App() {
   }, []);
 
   const handleQuickSave = useCallback(
-    (data: { label: string; fields: Record<string, string> }) => {
+    (data: { template: string; label: string; fields: Record<string, string> }) => {
       const username = data.fields["Username"] || data.fields["Email"] || "";
       const password = data.fields["Password"] || data.fields["Secret"] || "";
       const url = data.fields["URL"] || (currentDomain ? `https://${currentDomain}` : "");
       chrome.runtime.sendMessage(
-        { type: "SAVE_CREDENTIAL", username, password, url, domain: currentDomain } as Message,
+        {
+          type: "SAVE_CREDENTIAL",
+          username,
+          password,
+          url,
+          domain: currentDomain,
+          label: data.label,
+          fields: data.fields,
+          template: data.template,
+        } as Message,
         () => {
           setShowQuickAdd(false);
           if (currentDomain) {
             chrome.runtime.sendMessage(
               { type: "GET_CREDENTIALS", domain: currentDomain } as Message,
-              (res: Message) => { if (res?.type === "CREDENTIALS_RESULT") setCredentials(res.credentials); }
+              (res: Message) => {
+                if (res?.type === "CREDENTIALS_RESULT") setCredentials(res.credentials);
+              },
             );
           }
-        }
+        },
       );
     },
-    [currentDomain]
+    [currentDomain],
   );
 
   // Filter credentials by score — "all" uses the preloaded allCredentials.
   // Deprecated credentials are dropped from "matching" and "domain" tiers
   // (still findable via search and visible in "all").
+  // The filter the user picked, widened when it would show nothing for this
+  // site: "matching" falls back to "domain", and "domain" to "all". Derived
+  // rather than written back into state so the tabs and the list agree
+  // within one render.
+  const effectiveFilter: Filter = (() => {
+    if (searchQuery || credentials.length === 0) return activeFilter;
+    const hasMatching = credentials.some(
+      (c) => (c.score ?? 0) >= 100 && !isDeprecated(c),
+    );
+    const hasDomain = credentials.some((c) => (c.score ?? 0) >= 25 && !isDeprecated(c));
+    if (activeFilter === "matching" && !hasMatching) return hasDomain ? "domain" : "all";
+    if (activeFilter === "domain" && !hasDomain) return "all";
+    return activeFilter;
+  })();
+
   const filteredCredentials = (() => {
     if (searchQuery) return credentials;
-    switch (activeFilter) {
+    switch (effectiveFilter) {
       case "matching":
         return credentials.filter((c) => (c.score ?? 0) >= 100 && !isDeprecated(c));
       case "domain":
@@ -282,22 +360,15 @@ export function App() {
         const merged = [...credentials];
         for (const c of allCredentials) {
           const key = `${c.pagePath}:${c.label}`;
-          if (!seen.has(key)) { seen.add(key); merged.push(c); }
+          if (!seen.has(key)) {
+            seen.add(key);
+            merged.push(c);
+          }
         }
         return merged;
       }
     }
   })();
-
-  // Auto-switch to "all" if no matching/domain results
-  useEffect(() => {
-    if (!searchQuery && activeFilter === "matching" && filteredCredentials.length === 0 && credentials.length > 0) {
-      setActiveFilter("domain");
-    }
-    if (!searchQuery && activeFilter === "domain" && filteredCredentials.length === 0 && credentials.length > 0) {
-      setActiveFilter("all");
-    }
-  }, [credentials, activeFilter, searchQuery, filteredCredentials.length]);
 
   const filterCounts = {
     matching: credentials.filter((c) => (c.score ?? 0) >= 100 && !isDeprecated(c)).length,
@@ -339,17 +410,23 @@ export function App() {
   if (showOnboarding) {
     return (
       <div className="min-h-[200px] max-h-[580px]">
-        <Onboarding onComplete={() => {
-          setShowOnboarding(false);
-          // Re-check connection after onboarding
-          chrome.runtime.sendMessage({ type: "GET_STATUS" } as Message, (res: Message) => {
-            if (res?.type === "STATUS_RESULT") {
-              setConnection(res.connected ? "connected" : res.vaultUnlocked ? "vault_locked" : "disconnected");
-              setVersion(res.version); setVaultSyncVersion(res.vaultSyncVersion);
-              setPlan(res.plan);
-            }
-          });
-        }} />
+        <Onboarding
+          onComplete={() => {
+            setShowOnboarding(false);
+            // Re-check connection after onboarding
+            chrome.runtime.sendMessage(
+              { type: "GET_STATUS" } as Message,
+              (res: Message) => {
+                if (res?.type === "STATUS_RESULT") {
+                  setConnection(connectionFromStatus(res));
+                  setVersion(res.version);
+                  setVaultSyncVersion(res.vaultSyncVersion);
+                  setPlan(res.plan);
+                }
+              },
+            );
+          }}
+        />
       </div>
     );
   }
@@ -381,38 +458,35 @@ export function App() {
       {/* Settings tab — always accessible */}
       {activeTab === "settings" ? (
         <SettingsPanel onTestConnection={handleTestConnection} />
-
-      /* Generator tab — works without connection (pure local crypto) */
-      ) : activeTab === "generator" ? (
+      ) : /* Generator tab — works without connection (pure local crypto) */
+      activeTab === "generator" ? (
         <PasswordGenerator />
-
-      /* Permission needed takes precedence over other disconnected states */
-      ) : connection === "permission_needed" ? (
+      ) : /* Permission needed takes precedence over other disconnected states */
+      connection === "permission_needed" ? (
         <PermissionPrompt
           onGranted={() => {
             // Re-fetch status so the UI refreshes into "connected" / "vault_locked".
-            chrome.runtime.sendMessage({ type: "GET_STATUS" } as Message, (res: Message) => {
-              if (res?.type === "STATUS_RESULT") {
-                if (res.permissionNeeded) {
-                  setConnection("permission_needed");
-                } else {
-                  setConnection(res.connected ? "connected" : res.vaultUnlocked ? "vault_locked" : "disconnected");
+            chrome.runtime.sendMessage(
+              { type: "GET_STATUS" } as Message,
+              (res: Message) => {
+                if (res?.type === "STATUS_RESULT") {
+                  setConnection(connectionFromStatus(res));
+                  setVersion(res.version);
+                  setVaultSyncVersion(res.vaultSyncVersion);
+                  setPlan(res.plan);
                 }
-                setVersion(res.version); setVaultSyncVersion(res.vaultSyncVersion);
-                setPlan(res.plan);
-              }
-            });
+              },
+            );
           }}
         />
-
-      /* Logins & Identity require connection */
-      ) : connection === "disconnected" ? (
+      ) : /* Logins & Identity require connection */
+      connection === "disconnected" || connection === "unauthorized" ? (
         <div className="flex flex-col">
           <EmptyState
-            variant="disconnected"
+            variant={connection === "unauthorized" ? "unauthorized" : "disconnected"}
             onAction={() => setActiveTab("settings")}
           />
-          <UnsavedCredentials connected={false} />
+          <WaitingToSave connected={false} />
         </div>
       ) : connection === "vault_locked" ? (
         <EmptyState variant="vault-locked" />
@@ -420,23 +494,43 @@ export function App() {
         <>
           {activeTab === "logins" && (
             <div className="flex flex-col flex-1 min-h-0">
-              <RecentlyFilled onFill={handleFill} onCopy={handleCopy} />
+              <WaitingToSave
+                connected={connection === "connected"}
+                onChanged={() => {
+                  if (currentDomain) {
+                    chrome.runtime.sendMessage(
+                      { type: "GET_CREDENTIALS", domain: currentDomain } as Message,
+                      (res: Message) => {
+                        if (res?.type === "CREDENTIALS_RESULT") setCredentials(res.credentials);
+                      },
+                    );
+                  }
+                }}
+              />
+              <CaptureNote domain={currentDomain} />
+              <PasskeyNotice domain={currentDomain} />
+              <RecentlyFilled onFill={handleFill} />
               <SearchBar value={searchQuery} onChange={handleSearch} />
 
-              {!searchQuery && (credentials.length > 0 || allCredentials.length > 0) && (() => {
-                // Hide the FilterBar entirely when only one tier actually has
-                // results — it just adds visual weight when there's nothing
-                // to switch between.
-                const populated = (filterCounts.matching > 0 ? 1 : 0) + (filterCounts.domain > 0 ? 1 : 0) + (filterCounts.all > 0 ? 1 : 0);
-                if (populated < 2) return null;
-                return (
-                  <FilterBar
-                    active={activeFilter}
-                    onFilterChange={setActiveFilter}
-                    counts={filterCounts}
-                  />
-                );
-              })()}
+              {!searchQuery &&
+                (credentials.length > 0 || allCredentials.length > 0) &&
+                (() => {
+                  // Hide the FilterBar entirely when only one tier actually has
+                  // results — it just adds visual weight when there's nothing
+                  // to switch between.
+                  const populated =
+                    (filterCounts.matching > 0 ? 1 : 0) +
+                    (filterCounts.domain > 0 ? 1 : 0) +
+                    (filterCounts.all > 0 ? 1 : 0);
+                  if (populated < 2) return null;
+                  return (
+                    <FilterBar
+                      active={effectiveFilter}
+                      onFilterChange={setActiveFilter}
+                      counts={filterCounts}
+                    />
+                  );
+                })()}
 
               {filteredCredentials.length === 0 ? (
                 <EmptyState
@@ -448,13 +542,26 @@ export function App() {
               ) : (
                 <div ref={listRef} className="flex-1 overflow-y-auto relative">
                   {reusedReport && reusedReport.reusedCount >= 2 && (
-                    <div className="flex items-center gap-2 px-3 py-1.5 text-[11px] border-b border-border" style={{ background: "color-mix(in oklab, var(--color-warning) 15%, transparent)", color: "var(--color-warning)" }}>
+                    <div
+                      className="flex items-center gap-2 px-3 py-1.5 text-[11px] border-b border-border"
+                      style={{
+                        background:
+                          "color-mix(in oklab, var(--color-warning) 15%, transparent)",
+                        color: "var(--color-warning)",
+                      }}
+                    >
                       <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
                         <circle cx="8" cy="8" r="7" opacity="0.85" />
-                        <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" />
+                        <path
+                          d="M5.5 5.5l5 5M10.5 5.5l-5 5"
+                          stroke="#fff"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                        />
                       </svg>
                       <span>
-                        <strong>{reusedReport.reusedCount}</strong> credentials share passwords with another login
+                        <strong>{reusedReport.reusedCount}</strong> credentials share
+                        passwords with another login
                       </span>
                     </div>
                   )}
@@ -465,15 +572,20 @@ export function App() {
                     copyFeedback={copyFeedback}
                     selectedIndex={selectedIndex}
                     reusedHashes={reusedReport?.reusedHashes}
-                    credentialHashes={reusedReport
-                      ? new Map(Array.from(reusedReport.byCredential, ([k, v]) => [k, v.hash]))
-                      : undefined}
+                    credentialHashes={
+                      reusedReport
+                        ? new Map(
+                            Array.from(reusedReport.byCredential, ([k, v]) => [
+                              k,
+                              v.hash,
+                            ]),
+                          )
+                        : undefined
+                    }
                   />
                 </div>
               )}
 
-              {/* Unsaved credentials queue */}
-              <UnsavedCredentials connected={connection === "connected"} />
 
               {/* Quick Add — subtle bottom bar, not FAB */}
               {!showQuickAdd && (
@@ -484,7 +596,12 @@ export function App() {
                     title="Add new credential"
                   >
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                      <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                      <path
+                        d="M8 3v10M3 8h10"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                      />
                     </svg>
                     Add new
                   </button>
@@ -502,7 +619,9 @@ export function App() {
             </div>
           )}
 
-          {activeTab === "identity" && <IdentityTab connected={connection === "connected"} />}
+          {activeTab === "identity" && (
+            <IdentityTab connected={connection === "connected"} />
+          )}
         </>
       )}
     </div>

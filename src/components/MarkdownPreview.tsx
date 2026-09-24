@@ -12,14 +12,16 @@
  *
  * Note: this preview renders the raw markdown source, so `:::secret` blocks appear
  * as literal text here; decrypted secret values are shown by `SecretCard`, not by
- * this component. Local `_media/` images are resolved to data URLs via a Tauri
- * command after render.
+ * this component. Local `_media/` references are resolved after render:
+ * images from their bytes (badged when sealed), PDFs as chips, never inline.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Marked } from "marked";
 import { usePagesStore } from "@/stores/pages-store";
 import { useExtensionStore } from "@/stores/extension-store";
-import { readMediaDataUrl } from "@/lib/commands";
+import { readMedia } from "@/lib/commands";
+import { extOf } from "@/lib/attachments";
+import { showChip, showImage } from "@/lib/preview-attachments";
 import type { PurifyOptions } from "@/lib/extensions/preview-pipeline";
 import {
   createMarkedInstance,
@@ -33,13 +35,22 @@ import { PreviewContextMenu } from "@/components/PreviewContextMenu";
 
 interface MarkdownPreviewProps {
   content: string;
+  /** Saves a page edited from the preview, such as an attachment removed. */
+  onContentChange?: (content: string) => Promise<void>;
 }
 
 /** Renders markdown `content` to sanitized HTML, honoring enabled extensions. */
-export default function MarkdownPreview({ content }: MarkdownPreviewProps) {
+export default function MarkdownPreview({
+  content,
+  onContentChange,
+}: MarkdownPreviewProps) {
   const folder = usePagesStore((s) => s.activePage?.meta.folder ?? "general");
   const enabledMap = useExtensionStore((s) => s.enabledMap);
   const divRef = useRef<HTMLDivElement>(null);
+  // Bumped when an attachment changes on disk (sealed, unsealed) without the
+  // markdown changing, so the resolve pass runs again over the same HTML.
+  const [mediaVersion, setMediaVersion] = useState(0);
+  const refreshMedia = useCallback(() => setMediaVersion((v) => v + 1), []);
 
   // Pipeline state: rebuilt when enabled extensions change and libraries finish loading
   const [pipeline, setPipeline] = useState<{
@@ -97,45 +108,50 @@ export default function MarkdownPreview({ content }: MarkdownPreviewProps) {
     return runPostProcessors(divRef.current, pipeline.loadedMap);
   }, [html, pipeline]);
 
-  // After render, resolve _media/ image paths via Tauri command
+  // After render, resolve every _media/ reference. Each change to the DOM
+  // returns an undo, run on cleanup so a re-resolve starts from the rendered
+  // markup rather than from the previous pass's wrappers and chips.
   useEffect(() => {
     if (!divRef.current) return;
     const imgs = divRef.current.querySelectorAll<HTMLImageElement>('img[src^="_media/"]');
     if (imgs.length === 0) return;
 
     let cancelled = false;
-    const placeholders: HTMLElement[] = [];
+    const undos: (() => void)[] = [];
 
     imgs.forEach((img) => {
-      const src = img.getAttribute("src")!;
+      const src = img.getAttribute("src");
+      if (!src) return;
+      const inline = extOf(src) !== "pdf";
       img.style.display = "none";
       const placeholder = document.createElement("em");
-      placeholder.textContent = `[Loading image: ${img.alt || src}]`;
+      placeholder.textContent = `[Loading ${inline ? "image" : "attachment"}: ${img.alt || src}]`;
       placeholder.style.color = "var(--color-text-muted, gray)";
       img.parentNode?.insertBefore(placeholder, img);
-      placeholders.push(placeholder);
+      undos.push(() => {
+        placeholder.remove();
+        img.style.display = "";
+      });
 
-      readMediaDataUrl(folder, src)
-        .then((dataUrl) => {
+      readMedia(folder, src, inline)
+        .then((read) => {
           if (cancelled) return;
-          img.src = dataUrl;
-          img.style.display = "";
-          img.loading = "lazy";
           placeholder.remove();
+          undos.push(inline ? showImage(img, read) : showChip(img, read));
         })
         .catch((err) => {
           if (cancelled) return;
           console.error("[media] failed:", src, err);
-          placeholder.textContent = `[Failed to load image: ${img.alt || src}]`;
-          placeholder.style.color = "red";
+          placeholder.textContent = `[Failed to load: ${img.alt || src}]`;
+          placeholder.style.color = "var(--color-danger, red)";
         });
     });
 
     return () => {
       cancelled = true;
-      placeholders.forEach((p) => p.remove());
+      undos.reverse().forEach((undo) => undo());
     };
-  }, [html, folder]);
+  }, [html, folder, mediaVersion]);
 
   {
     /* All content is sanitized through DOMPurify in renderMarkdown() */
@@ -147,7 +163,13 @@ export default function MarkdownPreview({ content }: MarkdownPreviewProps) {
         className="claspt-prose px-6 py-4"
         dangerouslySetInnerHTML={{ __html: html }}
       />
-      <PreviewContextMenu containerRef={divRef} />
+      <PreviewContextMenu
+        containerRef={divRef}
+        folder={folder}
+        content={content}
+        onContentChange={onContentChange}
+        onAttachmentChanged={refreshMedia}
+      />
     </>
   );
 }

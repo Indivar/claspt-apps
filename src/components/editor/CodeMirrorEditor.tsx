@@ -11,7 +11,7 @@
  * and exposes the live view through the shared `editor-api` module so toolbar
  * buttons and the context menu can drive it.
  */
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Compartment, EditorState } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers } from "@codemirror/view";
@@ -43,11 +43,15 @@ import { mathPreviewPlugin } from "./extensions/math-preview";
 import { wikilinkCompletionSource } from "./extensions/wikilink-autocomplete";
 import { calloutHighlightField } from "./extensions/callout-highlight";
 import { headingLineExtension } from "./extensions/heading-lines";
-import { setActiveView, insertImageMarkdown } from "./editor-api";
+import { setActiveView } from "./editor-api";
 import { EditorContextMenu } from "./EditorContextMenu";
-import { usePagesStore } from "@/stores/pages-store";
 import { useExtensionStore } from "@/stores/extension-store";
-import { saveMedia } from "@/lib/commands";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { toast } from "sonner";
+import { errorMessage } from "@/lib/error-message";
+import { ATTACHMENT_MIME_TYPES, extOf, isAttachmentExt } from "@/lib/attachments";
+import { nextDropTarget } from "@/lib/drop-target";
+import { sourceFromFile, sourceFromPath, useAttachStore } from "@/stores/attach-store";
 
 /** Build CM6 extension plugins based on the current extension enabled map. */
 function buildExtensionPlugins(enabledMap: Record<string, boolean>): Extension[] {
@@ -94,7 +98,9 @@ export default function CodeMirrorEditor({
   const extensionCompartment = useRef(new Compartment());
 
   // Keep callback ref up to date without recreating editor
-  onChangeRef.current = onChange;
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
 
   const createEditor = useCallback(() => {
     if (!containerRef.current) return;
@@ -256,85 +262,121 @@ export default function CodeMirrorEditor({
     });
   }, [searchHighlight, onSearchHighlightApplied]);
 
-  // Paste + Drop image handlers
-  const folder = usePagesStore((s) => s.activePage?.meta.folder ?? "general");
+  // Paste and drop: every file goes through the attach dialog, one at a
+  // time, so neither path can skip the encryption question or the limit.
+  const enqueue = useAttachStore((s) => s.enqueue);
+  // A file drag over the editor shows a frame saying the drop will be taken.
+  const [dropTarget, setDropTarget] = useState(false);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
-    const ALLOWED_TYPES = [
-      "image/png",
-      "image/jpeg",
-      "image/gif",
-      "image/webp",
-      "image/svg+xml",
-      "application/pdf",
-    ];
-
-    async function handleImageFiles(files: File[]) {
-      for (const file of files) {
-        const ext = file.name.split(".").pop()?.toLowerCase() ?? "png";
-        const buf = await file.arrayBuffer();
-        const data = Array.from(new Uint8Array(buf));
-        try {
-          const mf = await saveMedia(folder, data, ext);
-          const alt = file.name.replace(/\.[^.]+$/, "");
-          insertImageMarkdown(alt, mf.md_path);
-        } catch (err) {
-          console.error("Failed to save media:", err);
-        }
-      }
+    function acceptable(file: File): boolean {
+      return (
+        ATTACHMENT_MIME_TYPES.includes(file.type) || isAttachmentExt(extOf(file.name))
+      );
     }
 
     function onPaste(e: ClipboardEvent) {
       const items = e.clipboardData?.items;
       if (!items) return;
-      const imageFiles: File[] = [];
+      const files: File[] = [];
       for (const item of items) {
-        if (ALLOWED_TYPES.includes(item.type)) {
-          const file = item.getAsFile();
-          if (file) imageFiles.push(file);
-        }
+        if (!ATTACHMENT_MIME_TYPES.includes(item.type)) continue;
+        const file = item.getAsFile();
+        if (file) files.push(file);
       }
-      if (imageFiles.length > 0) {
-        e.preventDefault();
-        handleImageFiles(imageFiles);
-      }
+      if (files.length === 0) return;
+      e.preventDefault();
+      enqueue(files.map(sourceFromFile));
     }
 
     function onDrop(e: DragEvent) {
-      const files = e.dataTransfer?.files;
-      if (!files) return;
-      const imageFiles: File[] = [];
-      for (const file of files) {
-        if (ALLOWED_TYPES.includes(file.type)) {
-          imageFiles.push(file);
-        }
-      }
-      if (imageFiles.length > 0) {
-        e.preventDefault();
-        handleImageFiles(imageFiles);
-      }
+      const files = Array.from(e.dataTransfer?.files ?? []).filter(acceptable);
+      if (files.length === 0) return;
+      e.preventDefault();
+      enqueue(files.map(sourceFromFile));
     }
 
     function onDragOver(e: DragEvent) {
       e.preventDefault();
     }
+    function onDragEnter(e: DragEvent) {
+      if (e.dataTransfer?.types.includes("Files")) setDropTarget(true);
+    }
+    function onDragLeave() {
+      setDropTarget(false);
+    }
 
     el.addEventListener("paste", onPaste);
     el.addEventListener("drop", onDrop);
     el.addEventListener("dragover", onDragOver);
+    el.addEventListener("dragenter", onDragEnter);
+    el.addEventListener("dragleave", onDragLeave);
+
+    // With the window's native drag-and-drop on (the default), dropped files
+    // reach the webview as paths through Tauri and no HTML5 drop event fires.
+    // Only a drop over the editor counts; one over the sidebar is not an
+    // attach. Physical coordinates are scaled to CSS pixels for the check.
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    // Whether the drag in progress holds a file the editor would attach;
+    // only the enter event says, so it is kept for the over events.
+    let attachableDrag = false;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const scale = window.devicePixelRatio || 1;
+        const rect = el.getBoundingClientRect();
+        const target = nextDropTarget(
+          event.payload,
+          attachableDrag,
+          rect,
+          scale,
+          (path) => isAttachmentExt(extOf(path)),
+        );
+        attachableDrag = target.attachable;
+        setDropTarget(target.active);
+        if (event.payload.type !== "drop") return;
+        const x = event.payload.position.x / scale;
+        const y = event.payload.position.y / scale;
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return;
+        const paths = event.payload.paths.filter((path) => isAttachmentExt(extOf(path)));
+        if (paths.length === 0) return;
+        Promise.all(paths.map(sourceFromPath))
+          .then(enqueue)
+          .catch((err) => toast.error(`Could not read that file: ${errorMessage(err)}`));
+      })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch((err) => console.warn("[editor] drag-drop listener unavailable:", err));
+
     return () => {
+      disposed = true;
+      unlisten?.();
       el.removeEventListener("paste", onPaste);
       el.removeEventListener("drop", onDrop);
       el.removeEventListener("dragover", onDragOver);
+      el.removeEventListener("dragenter", onDragEnter);
+      el.removeEventListener("dragleave", onDragLeave);
     };
-  }, [folder]);
+  }, [enqueue]);
 
   return (
     <>
       <div ref={containerRef} className="absolute inset-0" />
+      {dropTarget && (
+        <div
+          role="status"
+          className="pointer-events-none absolute inset-2 z-20 flex items-center justify-center rounded-xl border-2 border-dashed border-accent bg-surface/80"
+        >
+          <p className="rounded-lg bg-surface-raised px-4 py-2 text-[13px] font-medium text-text-primary shadow-sm">
+            Drop to attach to this page
+          </p>
+        </div>
+      )}
       <EditorContextMenu containerRef={containerRef} />
     </>
   );

@@ -220,14 +220,22 @@ Press `Cmd+Shift+S` to open the secret template picker. Templates insert pre-str
 
 | Template | Fields |
 |----------|--------|
-| **Website Login** | URL, Username, Password, Notes |
-| **API Key** | Service, Key, Secret, Endpoint |
-| **Credit Card** | Cardholder, Number, Expiry, CVV |
-| **Bank Account** | Bank, Account Number, Routing, SWIFT |
-| **SSH Key** | Host, Username, Private Key, Passphrase |
-| **Wi-Fi Network** | SSID, Password, Security Type |
-| **Identity Document** | Type, Number, Issuing Authority, Expiry |
+| **Website Login** | URL, Username, Password, Authenticator Key, Backup Codes |
+| **Email Account** | Email, Password, IMAP Server, SMTP Server, Authenticator Key |
+| **Server Login** | Host, Port, Username, Password, Notes |
+| **SSH Key** | Host, Username, Private Key, Passphrase, Public Key |
+| **Database** | Host, Port, Database, Username, Password, Connection String |
+| **API Key** | Service, API Key, API Secret, Endpoint, Rotate Every |
+| **Environment Variable** | Variable, Value, Used By |
+| **Software Licence** | Product, Licence Key, Registered To, Purchase Date, Seats |
+| **Credit Card** | Card Number, Cardholder, Expiry, CVV, PIN |
+| **Bank Account** | Bank, Account Number, IFSC / SWIFT / Routing, Branch, Type |
+| **Wi-Fi Network** | SSID, Password, Security |
+| **Identity Document** | Type, Number, Issue Date, Expiry Date, Authority |
+| **Crypto Wallet** | Wallet, Address, Seed Phrase, Passphrase |
 | **Custom** | Free-form key-value pairs |
+
+The same templates are in the browser extension's **Add new** form, and any template you save under Settings › Automation › Templates joins the picker. The Authenticator Key field shows the live code as you paste, and the SSH Key template stores the key so the SSH agent can offer it once the page is tagged `ssh-key`.
 
 ## Convert Selection to Secret(s)
 
@@ -974,17 +982,20 @@ Sync your vault across multiple devices with Claspt Sync:
 
 ### Setup
 
-1. Open **Settings > Sync**
+Sync is part of Pro.
+
+1. Open **Settings > Account & Sync**
 2. Choose your sync backend:
-   - **Claspt Sync** — managed cloud sync (Pro+)
-   - **Google Drive** — store encrypted vault data in your Drive (Pro)
+   - **Claspt Sync** — managed cloud sync
+   - **Google Drive** — store encrypted vault data in your Drive
 3. Sign in and authorize
 4. Sync happens automatically in the background
 
 ### Device Management
 
-- View all synced devices in **Settings > Sync > Devices**
-- Up to 5 devices per license (3 desktop + 2 mobile)
+- View all synced devices in **Settings > Account & Sync > Devices**
+- How many devices a licence covers is set by the licence itself, and shown
+  there
 - Remove a device to free up a slot
 
 ### Conflict Resolution
@@ -1062,7 +1073,7 @@ The dropdown includes a search bar to find any credential in your vault — not 
 Save new credentials directly from the extension:
 
 - Click **Add new** at the bottom of the popup
-- Choose from 7 templates: Password, API Key, SSH Key, Database, Wi-Fi, License Key, or Custom
+- Choose from the same templates as the desktop picker (Website Login, Email Account, Server Login, SSH Key, Database, API Key, Environment Variable, Software Licence, Credit Card, Bank Account, Wi-Fi Network, Identity Document, Crypto Wallet) or Custom; every field you fill is saved
 - Fill in the fields and save — the credential is stored in your Claspt vault
 
 ### Keyboard Shortcut

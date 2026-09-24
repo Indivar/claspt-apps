@@ -49,6 +49,7 @@
 //! unencrypted (see [`breaks_secret_fence`]).
 
 use crate::crypto::vault_key;
+pub use claspt_core::pages::secret::FenceTracker;
 
 use super::error::PageError;
 
@@ -75,8 +76,7 @@ const ENC_PREFIX: &str = "enc:v1:";
 pub fn encrypt_secrets(content: &str, master_key: &[u8]) -> Result<String, PageError> {
     transform_secrets(content, |block_content| {
         // Skip already-encrypted blocks
-        let trimmed = block_content.trim();
-        if trimmed.starts_with(ENC_PREFIX) {
+        if is_sealed_body(block_content) {
             return Ok(block_content.to_string());
         }
 
@@ -84,6 +84,53 @@ pub fn encrypt_secrets(content: &str, master_key: &[u8]) -> Result<String, PageE
             .map_err(|e| PageError::Crypto(e.to_string()))?;
         Ok(format!("{ENC_PREFIX}{encoded}"))
     })
+}
+
+/// Encrypt a page body the way its page is stored.
+///
+/// A full-body page seals everything; a block page seals only its blocks.
+/// Writers that took content, sealed the blocks and wrote it back, however
+/// the page was stored, rewrote a full-body page as a block page with the
+/// flag still set: plaintext on disk, and a page the app then failed to open.
+pub fn encrypt_for_page(
+    full_body: bool,
+    content: &str,
+    master_key: &[u8],
+) -> Result<String, PageError> {
+    if full_body {
+        encrypt_full_body(content, master_key)
+    } else {
+        encrypt_secrets(content, master_key)
+    }
+}
+
+/// The plaintext of a page body stored either way. The inverse of
+/// [`encrypt_for_page`] for the same page.
+pub fn decrypt_for_page(
+    full_body: bool,
+    content: &str,
+    master_key: &[u8],
+) -> Result<String, PageError> {
+    if full_body {
+        let body = decrypt_full_body(content, master_key)?;
+        decrypt_secrets(&body, master_key)
+    } else {
+        decrypt_secrets(content, master_key)
+    }
+}
+
+/// Whether a block body is exactly one sealed value and nothing else.
+///
+/// A sealed body is a single `enc:v1:` line. Testing only the prefix meant
+/// that anything appended under a sentinel, a field patched onto a block that
+/// would not decrypt, or a line typed beneath raw ciphertext in the editor,
+/// was written to disk in plaintext, and the audit still reported the block
+/// as encrypted. Anything more than the one line is treated as plaintext and
+/// sealed whole; a foreign blob wrapped that way is reversible, a leaked
+/// password is not.
+pub(crate) fn is_sealed_body(body: &str) -> bool {
+    let trimmed = body.trim();
+    trimmed.starts_with(ENC_PREFIX) && !trimmed.contains(char::is_whitespace)
 }
 
 /// Decrypt all encrypted secret blocks in markdown content.
@@ -236,13 +283,12 @@ pub fn redact_secrets(content: &str) -> String {
 
 /// Check if content contains any `:::secret[...]` blocks (outside code fences).
 pub fn has_secret_blocks(content: &str) -> bool {
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
     for line in content.lines() {
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             continue;
         }
-        if !in_code_fence && parse_secret_open(line).is_some() {
+        if !fence.is_open() && parse_secret_open(line).is_some() {
             return true;
         }
     }
@@ -255,13 +301,12 @@ pub fn has_secret_blocks(content: &str) -> bool {
 /// Skips `:::secret[...]` patterns inside fenced code blocks.
 pub fn extract_secret_labels(content: &str) -> Vec<String> {
     let mut labels = Vec::new();
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
     for line in content.lines() {
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             continue;
         }
-        if !in_code_fence {
+        if !fence.is_open() {
             if let Some(label) = parse_secret_open(line) {
                 labels.push(label);
             }
@@ -294,14 +339,13 @@ pub struct SecretBlockState {
 /// code fences are examples and are not listed, matching the encryptor.
 pub fn secret_block_states(content: &str) -> Vec<SecretBlockState> {
     let mut states = Vec::new();
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
     let mut lines = content.lines();
     while let Some(line) = lines.next() {
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             continue;
         }
-        if in_code_fence {
+        if fence.is_open() {
             continue;
         }
         let Some(label) = parse_secret_open(line) else {
@@ -334,7 +378,7 @@ pub fn secret_block_states(content: &str) -> Vec<SecretBlockState> {
 ///
 /// Handles escaped brackets: `:::secret[mongodb.com[2\]]` → label `mongodb.com[2]`.
 /// The `\]` escape sequence is unescaped in the returned label.
-pub(super) fn parse_secret_open(line: &str) -> Option<String> {
+pub(crate) fn parse_secret_open(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if !trimmed.starts_with(":::secret[") {
         return None;
@@ -385,12 +429,6 @@ fn unescape_label(raw: &str) -> String {
     out
 }
 
-/// Check if a line opens or closes a markdown fenced code block (``` or ~~~).
-pub(super) fn is_code_fence(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with("```") || trimmed.starts_with("~~~")
-}
-
 /// Generic transformer that processes each secret block's content through a callback.
 ///
 /// Skips `:::secret[...]` patterns that appear inside fenced code blocks (``` or ~~~),
@@ -402,7 +440,7 @@ where
     let mut result = String::with_capacity(content.len());
     let mut lines = content.lines().peekable();
     let mut first_line = true;
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
 
     while let Some(line) = lines.next() {
         if !first_line {
@@ -411,13 +449,12 @@ where
         first_line = false;
 
         // Track fenced code blocks — don't process secrets inside them
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             result.push_str(line);
             continue;
         }
 
-        if !in_code_fence && parse_secret_open(line).is_some() {
+        if !fence.is_open() && parse_secret_open(line).is_some() {
             // Write the opening fence as-is
             result.push_str(line);
             result.push('\n');
@@ -472,14 +509,13 @@ where
 /// Returns `(open_line_index, close_line_index)` where both are inclusive
 /// indices into `content.lines()`. Returns None if no block matches.
 fn find_block_range(content: &str, label: &str) -> Option<(usize, usize)> {
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
     let mut open_idx: Option<usize> = None;
     for (i, line) in content.lines().enumerate() {
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             continue;
         }
-        if in_code_fence {
+        if fence.is_open() {
             continue;
         }
         if let Some(open_label) = parse_secret_open(line) {
@@ -592,6 +628,12 @@ pub fn patch_block(
         Some((open_idx, close_idx)) => {
             let lines: Vec<&str> = content.lines().collect();
             let body = lines[open_idx + 1..close_idx].join("\n");
+            // Callers pass decrypted content. A body that is still a sealed
+            // sentinel here is one the master key could not open; adding
+            // fields under it would store them in the clear beside it.
+            if is_sealed_body(&body) {
+                return Err(PatchError::Sealed);
+            }
             let mut block_lines = parse_block_lines(&body);
 
             // Apply field updates.
@@ -793,6 +835,9 @@ pub(crate) fn escape_label(label: &str) -> String {
 pub enum PatchError {
     BlockNotFound,
     LabelConflict,
+    /// The block's value could not be decrypted with this vault's key, so it
+    /// cannot be edited without writing the edit in plaintext next to it.
+    Sealed,
     /// A label or field value contained a character that would break the
     /// line-based secret-block format (newline, carriage return, or other
     /// control char), which could cause the block to be stored UNENCRYPTED.
@@ -804,6 +849,10 @@ impl std::fmt::Display for PatchError {
         match self {
             Self::BlockNotFound => write!(f, "Secret block not found"),
             Self::LabelConflict => write!(f, "A different block already uses the new label"),
+            Self::Sealed => write!(
+                f,
+                "This secret block cannot be decrypted with the vault's key, so it cannot be edited"
+            ),
             Self::InvalidInput => write!(
                 f,
                 "Secret label and field values may not contain newlines or control characters"
@@ -1626,5 +1675,103 @@ password: hunter2";
                 ("unclosed", false, false, false),
             ]
         );
+    }
+
+    #[test]
+    fn a_fence_that_quotes_a_fence_does_not_hide_the_block_after_it() {
+        // CommonMark 4.5: while a fence is open, a line carrying an info
+        // string such as "```bash" is content, not a closer, and only a
+        // marker-only line of the same character and at least the opener's
+        // length closes it. Toggling on every marker line is one fence out of
+        // step with the editor, which then shows a lock on a value that was
+        // written to disk in plaintext.
+        let content = "```\n```bash\necho hi\n```\n\n:::secret[Prod DB]\npassword: hunter2\n:::\n";
+        let key = [7u8; 32];
+        let out = encrypt_secrets(content, &key).unwrap();
+        assert!(
+            !out.contains("hunter2"),
+            "value reached disk in plaintext:\n{out}"
+        );
+        assert!(has_secret_blocks(content));
+        assert_eq!(extract_secret_labels(content), vec!["Prod DB".to_string()]);
+    }
+
+    #[test]
+    fn a_fence_closes_only_on_its_own_character_and_length() {
+        let key = [7u8; 32];
+        // A tilde fence is not closed by backticks.
+        let tilde = "~~~\n```\n:::secret[A]\nv: one\n:::\n~~~\n\n:::secret[B]\nv: two\n:::\n";
+        let out = encrypt_secrets(tilde, &key).unwrap();
+        assert!(
+            out.contains("v: one"),
+            "A is a code example and must stay as written"
+        );
+        assert!(
+            !out.contains("two"),
+            "B follows the real closer and must be sealed"
+        );
+        // A four-backtick fence is not closed by three.
+        let long = "````\n```\n:::secret[A]\nv: one\n:::\n````\n\n:::secret[B]\nv: two\n:::\n";
+        let out = encrypt_secrets(long, &key).unwrap();
+        assert!(out.contains("v: one"));
+        assert!(!out.contains("two"));
+    }
+
+    #[test]
+    fn lines_under_a_sentinel_are_sealed_rather_than_written_plain() {
+        let key = [3u8; 32];
+        // A blob this key cannot open, with a field typed beneath it.
+        let content =
+            ":::secret[Foreign]\nenc:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\npassword: hunter2\n:::\n";
+        let out = encrypt_secrets(content, &key).unwrap();
+        assert!(
+            !out.contains("hunter2"),
+            "the appended line reached disk in plaintext:\n{out}"
+        );
+        // The whole body became one sealed value, and it is reversible.
+        let back = decrypt_secrets(&out, &key).unwrap();
+        assert!(back.contains("enc:v1:AAAA") && back.contains("password: hunter2"));
+
+        assert!(is_sealed_body("enc:v1:abc"));
+        assert!(is_sealed_body("  enc:v1:abc\n"));
+        assert!(!is_sealed_body("enc:v1:abc\npassword: x"));
+        assert!(!is_sealed_body("password: x"));
+    }
+
+    #[test]
+    fn a_block_that_will_not_decrypt_cannot_be_patched() {
+        let content = ":::secret[Foreign]\nenc:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n:::\n";
+        let err = patch_block(
+            content,
+            "Foreign",
+            &[("password".into(), "new".into())],
+            &[],
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, PatchError::Sealed));
+    }
+
+    #[test]
+    fn page_mode_round_trips_through_the_shared_helpers() {
+        let key = [4u8; 32];
+        let plain = "# Notes\n\n:::secret[DB]\npassword: hunter2\n:::\n";
+        for full_body in [false, true] {
+            let stored = encrypt_for_page(full_body, plain, &key).unwrap();
+            assert!(!stored.contains("hunter2"));
+            if full_body {
+                assert!(
+                    !stored.contains("# Notes"),
+                    "full-body must seal the prose too"
+                );
+            }
+            // The page transform has always normalised the trailing newline away.
+            assert_eq!(
+                decrypt_for_page(full_body, &stored, &key)
+                    .unwrap()
+                    .trim_end(),
+                plain.trim_end()
+            );
+        }
     }
 }

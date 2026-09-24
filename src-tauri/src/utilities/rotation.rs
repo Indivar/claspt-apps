@@ -146,7 +146,7 @@ pub fn refresh_alerts(
     now: DateTime<Utc>,
 ) -> Result<(usize, usize), PageError> {
     let report = rotation_due(vault_dir, master_key, max_age_days, now)?;
-    let existing = security_alerts::get_alerts(vault_dir);
+    let existing = security_alerts::get_alerts(vault_dir, master_key);
     let open: Vec<&SecurityAlert> = existing
         .iter()
         .filter(|a| a.alert_type == ALERT_TYPE && !a.resolved)
@@ -165,7 +165,7 @@ pub fn refresh_alerts(
             alert.label.as_deref().unwrap_or(""),
         );
         if !due_keys.contains(&key) {
-            security_alerts::resolve_alert(vault_dir, &alert.id)?;
+            security_alerts::resolve_alert(vault_dir, master_key, &alert.id)?;
             resolved += 1;
         }
     }
@@ -203,7 +203,7 @@ pub fn refresh_alerts(
             ),
         )
         .for_credential(&entry.page_path, &entry.label);
-        security_alerts::add_alert(vault_dir, &alert)?;
+        security_alerts::add_alert(vault_dir, master_key, &alert)?;
         added += 1;
     }
     Ok((added, resolved))
@@ -344,19 +344,19 @@ mod tests {
         assert_eq!(refresh_alerts(vault, &key, 180, now).unwrap(), (1, 0));
         // A second pass adds nothing; a dismissed alert still counts as raised.
         assert_eq!(refresh_alerts(vault, &key, 180, now).unwrap(), (0, 0));
-        let alert = security_alerts::get_active_alerts(vault)
+        let alert = security_alerts::get_active_alerts(vault, &key)
             .into_iter()
             .next()
             .unwrap();
         assert_eq!(alert.alert_type, ALERT_TYPE);
         assert_eq!(alert.page_path.as_deref(), Some(shop.as_str()));
         assert!(alert.description.contains("300 days"));
-        security_alerts::dismiss_alert(vault, &alert.id).unwrap();
+        security_alerts::dismiss_alert(vault, &key, &alert.id).unwrap();
         assert_eq!(refresh_alerts(vault, &key, 180, now).unwrap(), (0, 0));
         // Changing the password (a fresh save) resolves it.
         store(vault, &key, "shop", "Shop", &[("password", "rotated")], &[]);
         assert_eq!(refresh_alerts(vault, &key, 180, now).unwrap(), (0, 1));
-        assert!(security_alerts::get_alerts(vault)
+        assert!(security_alerts::get_alerts(vault, &key)
             .iter()
             .all(|a| a.resolved));
         // Turned off: nothing raised, nothing touched.

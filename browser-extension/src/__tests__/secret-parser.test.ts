@@ -63,14 +63,25 @@ describe("parseSecretFields", () => {
   });
 
   it("lowercases keys and skips blank or valueless lines", () => {
-    expect(parseSecretFields("URL_Match: host\n\nnote:\n")).toEqual({ url_match: "host" });
+    expect(parseSecretFields("URL_Match: host\n\nnote:\n")).toEqual({
+      url_match: "host",
+    });
   });
 });
 
 describe("extractSecretBlocks", () => {
   it("extracts a simple block", () => {
     const blocks = extractSecretBlocks(
-      ["# Note", "", ":::secret[GitHub]", "username: me", "password: pw", ":::", "", "trailing"].join("\n"),
+      [
+        "# Note",
+        "",
+        ":::secret[GitHub]",
+        "username: me",
+        "password: pw",
+        ":::",
+        "",
+        "trailing",
+      ].join("\n"),
     );
     expect(blocks).toHaveLength(1);
     expect(blocks[0].label).toBe("GitHub");
@@ -79,7 +90,14 @@ describe("extractSecretBlocks", () => {
 
   it("extracts several blocks from one page", () => {
     const blocks = extractSecretBlocks(
-      [":::secret[One]", "password: a", ":::", ":::secret[Two]", "password: b", ":::"].join("\n"),
+      [
+        ":::secret[One]",
+        "password: a",
+        ":::",
+        ":::secret[Two]",
+        "password: b",
+        ":::",
+      ].join("\n"),
     );
     expect(blocks.map((b) => b.label)).toEqual(["One", "Two"]);
   });
@@ -138,5 +156,25 @@ describe("extractSecretBlocks", () => {
 
   it("returns nothing for content with no blocks", () => {
     expect(extractSecretBlocks("just a note\n")).toEqual([]);
+  });
+});
+
+describe("fenced code blocks follow CommonMark", () => {
+  it("a fence that quotes a fence does not hide the block after it", () => {
+    // Inside an open fence, "```bash" is content, not a closer. One toggle
+    // out of step and every block below is treated as a code example.
+    const content =
+      "```\n```bash\necho hi\n```\n\n:::secret[Prod DB]\npassword: hunter2\n:::\n";
+    const blocks = extractSecretBlocks(content);
+    expect(blocks.map((b) => b.label)).toEqual(["Prod DB"]);
+  });
+
+  it("a fence closes only on its own character and length", () => {
+    const tilde =
+      "~~~\n```\n:::secret[A]\nv: one\n:::\n~~~\n\n:::secret[B]\nv: two\n:::\n";
+    expect(extractSecretBlocks(tilde).map((b) => b.label)).toEqual(["B"]);
+    const long =
+      "````\n```\n:::secret[A]\nv: one\n:::\n````\n\n:::secret[B]\nv: two\n:::\n";
+    expect(extractSecretBlocks(long).map((b) => b.label)).toEqual(["B"]);
   });
 });

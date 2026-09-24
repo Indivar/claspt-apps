@@ -12,6 +12,7 @@ vi.mock("@/lib/commands", () => ({
   createPage: vi.fn(),
   updatePage: vi.fn(),
   deletePage: vi.fn(),
+  trashRestore: vi.fn(),
   duplicatePage: vi.fn(),
   togglePin: vi.fn(),
   toggleArchive: vi.fn(),
@@ -41,6 +42,16 @@ const fakePage = {
   },
   content: "# Hello",
   path: "general/test.md",
+};
+
+const fakeTrashEntry = {
+  id: "1700000000000-abc",
+  original_path: "general/test.md",
+  title: "Test",
+  folder: "general",
+  encrypted: false,
+  deleted_at: "2026-09-20T00:00:00Z",
+  purge_at: "2026-10-20T00:00:00Z",
 };
 
 const fakePageSummary = {
@@ -105,7 +116,7 @@ describe("usePagesStore", () => {
 
   it("deletePage clears activePage if it matches", async () => {
     usePagesStore.setState({ activePage: fakePage });
-    mockCmd.deletePage.mockResolvedValue(undefined);
+    mockCmd.deletePage.mockResolvedValue(fakeTrashEntry);
     mockCmd.listPages.mockResolvedValue([]);
     await usePagesStore.getState().deletePage("general/test.md");
     expect(usePagesStore.getState().activePage).toBeNull();
@@ -113,14 +124,14 @@ describe("usePagesStore", () => {
 
   it("deletePage keeps activePage if different path", async () => {
     usePagesStore.setState({ activePage: fakePage });
-    mockCmd.deletePage.mockResolvedValue(undefined);
+    mockCmd.deletePage.mockResolvedValue(fakeTrashEntry);
     mockCmd.listPages.mockResolvedValue([fakePageSummary]);
     await usePagesStore.getState().deletePage("other/note.md");
     expect(usePagesStore.getState().activePage).toEqual(fakePage);
   });
 
   it("deletePage returns true on success and false on failure", async () => {
-    mockCmd.deletePage.mockResolvedValue(undefined);
+    mockCmd.deletePage.mockResolvedValue(fakeTrashEntry);
     mockCmd.listPages.mockResolvedValue([]);
     await expect(usePagesStore.getState().deletePage("general/test.md")).resolves.toBe(
       true,

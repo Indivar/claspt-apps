@@ -57,6 +57,31 @@ pub struct VaultConfig {
     pub ui_scale: f64,
     #[serde(default)]
     pub markdown_extensions: Option<HashMap<String, bool>>,
+    /// Largest attachment this vault accepts, in MB: the owner's own ceiling,
+    /// 1 to 25, 5 by default. A file over it is refused with both numbers
+    /// stated and the offer to raise this or, for an image, to shrink it;
+    /// nothing is shrunk or dropped on its own.
+    #[serde(default = "default_attachment_size_limit_mb")]
+    pub attachment_size_limit_mb: u32,
+    /// How long a deleted page waits in the trash before the unlock-time
+    /// purge removes it, in days (7 to 90).
+    #[serde(default = "default_trash_retention_days")]
+    pub trash_retention_days: u32,
+    /// The last answer to "encrypt this file?" in the attach dialog, so the
+    /// box starts where the owner left it. Off until they say otherwise.
+    #[serde(default)]
+    pub attachment_encrypt_default: bool,
+    /// Where this device's recovery key was last written, and when.
+    ///
+    /// The path, not the key. It is here so Settings can answer "where did I
+    /// put it?" long after the user has forgotten, and warn when the file has
+    /// since been moved or deleted. `.securenotes/` is gitignored, so this
+    /// stays on the device that saved it rather than travelling to others,
+    /// which is correct: the path is only meaningful here.
+    #[serde(default)]
+    pub recovery_key_saved_path: Option<String>,
+    #[serde(default)]
+    pub recovery_key_saved_at: Option<String>,
     #[serde(default)]
     pub local_api_enabled: Option<bool>,
     #[serde(default = "default_local_api_port")]
@@ -171,6 +196,14 @@ fn default_ui_scale() -> f64 {
     1.0
 }
 
+fn default_trash_retention_days() -> u32 {
+    crate::pages::trash::DEFAULT_RETENTION_DAYS
+}
+
+fn default_attachment_size_limit_mb() -> u32 {
+    crate::pages::media::DEFAULT_ATTACHMENT_LIMIT_MB
+}
+
 fn default_local_api_port() -> u16 {
     9315
 }
@@ -221,6 +254,25 @@ impl VaultConfig {
                     "{name} must be 0 (keep) or at most 3650, got {days}"
                 )));
             }
+        }
+        if !(1..=crate::pages::media::MAX_ATTACHMENT_LIMIT_MB)
+            .contains(&self.attachment_size_limit_mb)
+        {
+            return Err(VaultError::InvalidConfig(format!(
+                "attachment_size_limit_mb must be 1–{}, got {}",
+                crate::pages::media::MAX_ATTACHMENT_LIMIT_MB,
+                self.attachment_size_limit_mb
+            )));
+        }
+        if !(crate::pages::trash::MIN_RETENTION_DAYS..=crate::pages::trash::MAX_RETENTION_DAYS)
+            .contains(&self.trash_retention_days)
+        {
+            return Err(VaultError::InvalidConfig(format!(
+                "trash_retention_days must be {}–{}, got {}",
+                crate::pages::trash::MIN_RETENTION_DAYS,
+                crate::pages::trash::MAX_RETENTION_DAYS,
+                self.trash_retention_days
+            )));
         }
         if !(1..=600).contains(&self.secret_read_rate_limit_per_minute) {
             return Err(VaultError::InvalidConfig(format!(
@@ -319,6 +371,52 @@ impl VaultConfig {
         Ok(())
     }
 
+    /// Take the settings a person may change from `incoming` and keep every
+    /// field the app writes on its own from `self`, the copy on disk.
+    ///
+    /// The frontend saves the whole config from a copy it loaded earlier.
+    /// Without this, a stale copy would put back a vault id, key hash, token,
+    /// licence or biometric mode the app has changed since, and a foreign
+    /// copy could carry another vault's identity in. Every field the backend
+    /// writes by itself belongs in this list.
+    pub fn with_settings_from(self, incoming: VaultConfig) -> VaultConfig {
+        VaultConfig {
+            vault_version: self.vault_version,
+            vault_id: self.vault_id,
+            master_key_verify: self.master_key_verify,
+            biometric_mode: self.biometric_mode,
+            license_key: self.license_key,
+            local_api_token: self.local_api_token,
+            local_api_notes_token: self.local_api_notes_token,
+            local_api_secrets_token: self.local_api_secrets_token,
+            help_pages_version: self.help_pages_version,
+            recovery_key_saved_path: self.recovery_key_saved_path,
+            recovery_key_saved_at: self.recovery_key_saved_at,
+            ..incoming
+        }
+    }
+
+    /// Record the hash of the key that has just proved it opens this vault.
+    ///
+    /// The hash is how a keychain entry is proved to belong to this vault. A
+    /// hash from another key rejects the real biometric key on the next
+    /// unlock, and the app then switches biometrics off. A password unlock
+    /// is the one moment the real key is in hand, so it is where a missing
+    /// or wrong hash is put right.
+    pub fn record_master_key_verify(&mut self, actual: &str) -> MasterKeyVerifyChange {
+        match self.master_key_verify.as_deref() {
+            Some(stored) if stored == actual => MasterKeyVerifyChange::Unchanged,
+            Some(_) => {
+                self.master_key_verify = Some(actual.to_string());
+                MasterKeyVerifyChange::Repaired
+            }
+            None => {
+                self.master_key_verify = Some(actual.to_string());
+                MasterKeyVerifyChange::Backfilled
+            }
+        }
+    }
+
     /// Return the vault_id, generating a UUID v4 if not yet set.
     #[allow(dead_code)]
     pub fn ensure_vault_id(&mut self) -> String {
@@ -331,10 +429,23 @@ impl VaultConfig {
     }
 }
 
+/// What a password unlock did to the stored key hash.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MasterKeyVerifyChange {
+    Unchanged,
+    /// The vault predates the hash; it is recorded now.
+    Backfilled,
+    /// The hash on disk belonged to another key and has been replaced.
+    Repaired,
+}
+
 impl Default for VaultConfig {
     fn default() -> Self {
         Self {
             access_log_retention_months: default_access_log_retention_months(),
+            attachment_size_limit_mb: default_attachment_size_limit_mb(),
+            trash_retention_days: default_trash_retention_days(),
+            attachment_encrypt_default: false,
             secret_read_rate_limit_per_minute: default_secret_read_rate_limit_per_minute(),
             rotation_reminder_days: 180,
             memory_episodic_retention_days: 0,
@@ -375,6 +486,8 @@ impl Default for VaultConfig {
             help_pages_version: None,
             server_enabled: false,
             master_key_verify: None,
+            recovery_key_saved_path: None,
+            recovery_key_saved_at: None,
             tour_version_seen: None,
             setup_version_seen: None,
             user_email: None,
@@ -417,6 +530,112 @@ mod tests {
     fn default_config_validates() {
         let config = VaultConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn saving_settings_keeps_the_fields_the_app_owns() {
+        let on_disk = VaultConfig {
+            vault_version: "2.0".into(),
+            vault_id: Some("vault-a".into()),
+            master_key_verify: Some("hash-a".into()),
+            biometric_mode: "primary".into(),
+            license_key: Some("licence-a".into()),
+            local_api_token: Some("token-a".into()),
+            local_api_notes_token: Some("notes-a".into()),
+            local_api_secrets_token: Some("secrets-a".into()),
+            help_pages_version: Some("4.0.0".into()),
+            recovery_key_saved_path: Some("/keys/recovery.txt".into()),
+            recovery_key_saved_at: Some("2026-09-22".into()),
+            ..VaultConfig::default()
+        };
+        // A copy loaded before those were written, or from another vault,
+        // with two settings the person actually changed.
+        let incoming = VaultConfig {
+            vault_version: "1.0".into(),
+            vault_id: Some("vault-b".into()),
+            master_key_verify: Some("hash-b".into()),
+            biometric_mode: "disabled".into(),
+            license_key: None,
+            local_api_token: None,
+            local_api_notes_token: None,
+            local_api_secrets_token: None,
+            help_pages_version: None,
+            recovery_key_saved_path: None,
+            recovery_key_saved_at: None,
+            theme: "light".into(),
+            auto_lock_minutes: 42,
+            ..VaultConfig::default()
+        };
+
+        let merged = on_disk.with_settings_from(incoming);
+
+        assert_eq!(merged.vault_version, "2.0");
+        assert_eq!(merged.vault_id.as_deref(), Some("vault-a"));
+        assert_eq!(merged.master_key_verify.as_deref(), Some("hash-a"));
+        assert_eq!(merged.biometric_mode, "primary");
+        assert_eq!(merged.license_key.as_deref(), Some("licence-a"));
+        assert_eq!(merged.local_api_token.as_deref(), Some("token-a"));
+        assert_eq!(merged.local_api_notes_token.as_deref(), Some("notes-a"));
+        assert_eq!(merged.local_api_secrets_token.as_deref(), Some("secrets-a"));
+        assert_eq!(merged.help_pages_version.as_deref(), Some("4.0.0"));
+        assert_eq!(
+            merged.recovery_key_saved_path.as_deref(),
+            Some("/keys/recovery.txt")
+        );
+        assert_eq!(merged.recovery_key_saved_at.as_deref(), Some("2026-09-22"));
+        assert_eq!(merged.theme, "light");
+        assert_eq!(merged.auto_lock_minutes, 42);
+    }
+
+    #[test]
+    fn saving_settings_cannot_give_a_vault_an_identity_it_lacks() {
+        let on_disk = VaultConfig::default();
+        let incoming = VaultConfig {
+            vault_id: Some("vault-b".into()),
+            master_key_verify: Some("hash-b".into()),
+            ..VaultConfig::default()
+        };
+
+        let merged = on_disk.with_settings_from(incoming);
+
+        assert_eq!(merged.vault_id, None);
+        assert_eq!(merged.master_key_verify, None);
+    }
+
+    #[test]
+    fn a_password_unlock_records_a_missing_key_hash() {
+        let mut config = VaultConfig::default();
+
+        let change = config.record_master_key_verify("hash-real");
+
+        assert_eq!(change, MasterKeyVerifyChange::Backfilled);
+        assert_eq!(config.master_key_verify.as_deref(), Some("hash-real"));
+    }
+
+    #[test]
+    fn a_password_unlock_leaves_a_matching_key_hash_alone() {
+        let mut config = VaultConfig {
+            master_key_verify: Some("hash-real".into()),
+            ..VaultConfig::default()
+        };
+
+        let change = config.record_master_key_verify("hash-real");
+
+        assert_eq!(change, MasterKeyVerifyChange::Unchanged);
+        assert_eq!(config.master_key_verify.as_deref(), Some("hash-real"));
+    }
+
+    #[test]
+    fn a_password_unlock_replaces_a_key_hash_from_another_key() {
+        let mut config = VaultConfig {
+            master_key_verify: Some("hash-from-another-vault".into()),
+            ..VaultConfig::default()
+        };
+
+        let change = config.record_master_key_verify("hash-real");
+
+        assert_eq!(change, MasterKeyVerifyChange::Repaired);
+        assert_eq!(config.master_key_verify.as_deref(), Some("hash-real"));
     }
 
     #[test]

@@ -7,11 +7,33 @@
  * link. Also exposes a manual "Check for Updates" action.
  */
 import { useShareStore } from "@/stores/share-store";
+import { checkForSignedUpdate, installUpdate } from "@/lib/updater";
+import { useCallback, useState } from "react";
 import { APP_VERSION } from "@/lib/version";
 
 /** Renders current version, any available update, and a manual update-check button. */
 export function UpdateSection() {
   const { availableUpdate, checking, check } = useShareStore();
+  const [installing, setInstalling] = useState(false);
+  const [installPercent, setInstallPercent] = useState<number | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  const installFromSettings = useCallback(async () => {
+    setInstalling(true);
+    setInstallError(null);
+    try {
+      const update = await checkForSignedUpdate();
+      if (!update) {
+        setInstallError("No signed update is available for this build yet.");
+        return;
+      }
+      await installUpdate(update, (p) => setInstallPercent(p.percent));
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInstalling(false);
+    }
+  }, []);
 
   return (
     <div className="space-y-3">
@@ -32,15 +54,24 @@ export function UpdateSection() {
                 {availableUpdate.notes}
               </p>
             )}
+            {installError && (
+              <p className="mt-0.5 text-[11px] text-danger">{installError}</p>
+            )}
           </div>
-          <a
-            href={availableUpdate.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white transition-all hover:bg-accent-hover active:scale-95"
+          {/* Through the updater, never the server's URL as a link: the
+              updater verifies the manifest's signature before it writes a
+              byte, and a raw link did not. */}
+          <button
+            onClick={() => void installFromSettings()}
+            disabled={installing}
+            className="rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white transition-all hover:bg-accent-hover active:scale-95 disabled:opacity-60"
           >
-            Download
-          </a>
+            {installing
+              ? installPercent === null
+                ? "Downloading…"
+                : `Downloading ${installPercent}%`
+              : "Install update"}
+          </button>
         </div>
       ) : (
         <p className="text-[12px] text-text-muted">

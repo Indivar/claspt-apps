@@ -13,12 +13,15 @@
  */
 import type { ApiClient } from "./api-client";
 import type { Credential, LoginJob } from "@/shared/types";
+import { getRegistrableDomain } from "@/shared/url-matching";
 
 export interface LoginJobDeps {
   /** Open `url` in a new active tab and resolve with its id once loaded. */
   openTab(url: string): Promise<number>;
   /** The active tab, if any. */
   activeTab(): Promise<{ id: number; url: string } | null>;
+  /** The URL the tab shows right now, or null when it is gone. */
+  tabUrl(tabId: number): Promise<string | null>;
   /** Ask the content script in `tabId` to fill; true when it did. */
   fill(tabId: number, credential: Credential, submit: boolean): Promise<boolean>;
   /** Whether the user excluded this host from filling in the options. */
@@ -38,7 +41,22 @@ function hostnameOf(url: string): string | null {
   }
 }
 
-/** Carry one job out. Never throws; every failure becomes a reported message. */
+/** Same registrable domain: `accounts.example.com` is `example.com`'s. */
+function sameSite(a: string, b: string): boolean {
+  return getRegistrableDomain(a) === getRegistrableDomain(b);
+}
+
+/**
+ * Carry one job out. Never throws; every failure becomes a reported message.
+ *
+ * A job names a page (its own `url`, or the credential's) or it does not. With
+ * a page, the fill goes only where that page's site is still showing when the
+ * tab has finished loading; a redirect to another site between the load and
+ * the fill is refused. Without one, the fill goes to the active tab, and only
+ * without submitting: typing a password into whatever page happens to be in
+ * front and pressing enter is not a decision the desktop can have approved,
+ * because it did not know the page either.
+ */
 export async function executeLoginJob(
   job: LoginJob,
   deps: LoginJobDeps,
@@ -58,6 +76,13 @@ export async function executeLoginJob(
       }
       tabId = await deps.openTab(target);
     } else {
+      if (job.submit) {
+        return {
+          ok: false,
+          message:
+            "the credential has no url, so there is no page to submit on; add a url to it or ask for a fill without submit",
+        };
+      }
       const active = await deps.activeTab();
       if (!active) return { ok: false, message: "no login page given and no active tab" };
       hostname = hostnameOf(active.url);
@@ -68,6 +93,17 @@ export async function executeLoginJob(
         };
       }
       tabId = active.id;
+    }
+    // The page may have moved between loading and now: a login page that
+    // bounces to another site, or a tab the user navigated. The fill goes
+    // only to the site the job was for.
+    const current = await deps.tabUrl(tabId);
+    const currentHost = current ? hostnameOf(current) : null;
+    if (!currentHost || !hostname || !sameSite(currentHost, hostname)) {
+      return {
+        ok: false,
+        message: `the page is no longer on ${hostname ?? "the expected site"}; nothing was filled`,
+      };
     }
     const filled = await deps.fill(tabId, job.credential, job.submit);
     if (!filled) {

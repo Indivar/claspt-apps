@@ -2,9 +2,11 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 import type { Credential } from "@/shared/types";
-import type { DetectedField } from "./form-detector";
+import type { DetectedField, IdentityFieldType } from "./form-detector";
+import { isIdentityField } from "./form-detector";
 import { isDomainMismatch } from "@/shared/url-matching";
-import { generateTotp } from "@/shared/totp";
+import { generateTotp } from "@claspt/shared/totp";
+import { readTotpSeed } from "@claspt/shared/credential-fields";
 
 /**
  * Tracks the credential most recently filled into THIS document. Used by
@@ -36,7 +38,9 @@ export function isFillableOrigin(loc: Location = window.location): boolean {
   if (loc.protocol === "https:") return true;
   if (loc.protocol === "http:") {
     const host = loc.hostname;
-    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+    return (
+      host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1"
+    );
   }
   // file:, ftp:, data:, etc. — never fill.
   return false;
@@ -94,9 +98,19 @@ export function fillFields(
   let filled = false;
   const showFlash = options?.showFlash ?? true;
 
-  const username = credential.fields["username"] || credential.fields["user"] || credential.fields["login"] || credential.fields["email"];
+  const username =
+    credential.fields["username"] ||
+    credential.fields["user"] ||
+    credential.fields["login"] ||
+    credential.fields["email"];
   const password = credential.fields["password"] || credential.fields["pass"];
-  const totp = credential.fields["otp"] || credential.fields["totp"] || credential.fields["otp_secret"];
+  const totp = readTotpSeed(credential.fields);
+
+  // OTP fields are filled after the loop, asynchronously, with the current
+  // six-digit code. The loop used to assign the seed itself here and type it
+  // into the field: the login failed, and the long-lived seed sat in the
+  // page's DOM for any script to read and mint codes from forever.
+  const otpFields: HTMLInputElement[] = [];
 
   for (const field of fields) {
     let value: string | undefined;
@@ -111,7 +125,7 @@ export function fillFields(
         value = password;
         break;
       case "otp":
-        value = totp;
+        if (field.element.ownerDocument === document) otpFields.push(field.element);
         break;
     }
 
@@ -122,7 +136,11 @@ export function fillFields(
       value = password;
     }
     // Also: never fill a type="text"/"email" input with the password
-    if ((htmlType === "text" || htmlType === "email" || htmlType === "") && value === password && username) {
+    if (
+      (htmlType === "text" || htmlType === "email" || htmlType === "") &&
+      value === password &&
+      username
+    ) {
       value = username;
     }
 
@@ -141,8 +159,12 @@ export function fillFields(
 
   // Auto-fill TOTP: if we filled password and there's a TOTP secret but no OTP field
   // detected yet, watch for it to appear (common after password submission)
-  if (filled && options?.autoFillTotp && totp && !fields.some((f) => f.type === "otp")) {
-    watchForOtpField(totp);
+  if (options?.autoFillTotp && totp) {
+    if (otpFields.length > 0) {
+      for (const element of otpFields) fillOtpCode(element, totp);
+    } else if (filled) {
+      watchForOtpField(totp);
+    }
   }
 
   // Track this fill so the password-change auto-detect can later compare
@@ -162,7 +184,120 @@ export function fillFields(
   return filled;
 }
 
+/**
+ * The stored field names each detected identity field will accept, in order of
+ * preference.
+ *
+ * Identities are written by hand and by import, so the same thing arrives under
+ * several spellings. Listing them here keeps the matching in one readable place
+ * rather than spread through the fill loop.
+ */
+const IDENTITY_SOURCES: Record<IdentityFieldType, string[]> = {
+  full_name: ["full_name", "fullname", "name"],
+  first_name: ["first_name", "firstname", "given_name", "fname"],
+  last_name: ["last_name", "lastname", "family_name", "surname", "lname"],
+  phone: ["phone", "telephone", "mobile", "tel"],
+  street_1: ["street", "street_1", "address", "address_1", "address_line1", "addr1"],
+  street_2: ["street_2", "address_2", "address_line2", "addr2", "apartment", "unit"],
+  city: ["city", "town", "suburb"],
+  state: ["state", "province", "region", "county"],
+  postal_code: ["postal_code", "postcode", "zip", "zipcode", "post_code"],
+  country: ["country"],
+  organization: ["organization", "organisation", "company", "employer"],
+};
+
+/** Case- and separator-insensitive lookup, because stored names vary. */
+function readIdentityValue(
+  fields: Record<string, string>,
+  type: IdentityFieldType,
+): string | undefined {
+  const normalise = (k: string) => k.toLowerCase().replace(/[\s_-]+/g, "");
+  const flat = new Map<string, string>();
+  for (const [k, v] of Object.entries(fields)) flat.set(normalise(k), v);
+
+  for (const candidate of IDENTITY_SOURCES[type]) {
+    const hit = flat.get(normalise(candidate));
+    if (hit) return hit;
+  }
+
+  // A form wanting the whole name, from an identity that stores the parts.
+  if (type === "full_name") {
+    const first = readIdentityValue(fields, "first_name");
+    const last = readIdentityValue(fields, "last_name");
+    const joined = [first, last].filter(Boolean).join(" ");
+    if (joined) return joined;
+  }
+  return undefined;
+}
+
+/**
+ * Fill personal details into an address or signup form.
+ *
+ * Kept apart from [`fillFields`] rather than folded into it, because the two
+ * carry different risks and therefore different guards. A credential must
+ * never reach the wrong site, so that path refuses on a domain mismatch. An
+ * identity has no site it belongs to — a home address is the same address
+ * everywhere — so there is nothing to compare and no such check to make.
+ *
+ * The HTTPS guard does apply, and for the same reason: a postal address and a
+ * phone number in the clear are worth having, and this is the one place we can
+ * refuse to put them there.
+ */
+export function fillIdentityFields(
+  fields: DetectedField[],
+  identity: Record<string, string>,
+  options?: { showFlash?: boolean },
+): number {
+  if (!isFillableOrigin()) {
+    console.warn("[Claspt] Blocked identity fill on non-HTTPS origin");
+    return 0;
+  }
+
+  const showFlash = options?.showFlash ?? true;
+  let filled = 0;
+
+  for (const field of fields) {
+    if (!isIdentityField(field.type)) continue;
+
+    // Never write personal details into a password box, whatever the
+    // detector concluded about the field around it.
+    if (field.element.type?.toLowerCase() === "password") continue;
+
+    if (field.element.ownerDocument !== document) {
+      console.warn("[Claspt] Blocked identity fill in cross-origin iframe");
+      continue;
+    }
+
+    const value = readIdentityValue(identity, field.type);
+    if (!value) continue;
+
+    setInputValue(field.element, value);
+    if (showFlash) flashField(field.element);
+    filled++;
+  }
+
+  return filled;
+}
+
 /** Watch for OTP field to appear (e.g., after password step) and auto-fill it. */
+/**
+ * Put the current code for `totpSecret` into `field`, never the secret.
+ * A seed that will not decode fills nothing: a wrong six digits would be
+ * mistaken for a clock problem, while an empty box is obviously ours to fix.
+ */
+function fillOtpCode(field: HTMLInputElement, totpSecret: string) {
+  void generateTotp(totpSecret)
+    .then(({ code }) => {
+      if (code && !field.value) {
+        setInputValue(field, code);
+        flashField(field);
+      }
+    })
+    .catch(() => {
+      /* not a valid TOTP seed: fill nothing */
+    });
+}
+
 function watchForOtpField(totpSecret: string) {
   let attempts = 0;
   const maxAttempts = 20; // 10 seconds
@@ -175,27 +310,14 @@ function watchForOtpField(totpSecret: string) {
 
     const otpFields = document.querySelectorAll<HTMLInputElement>(
       'input[autocomplete="one-time-code"], input[name*="otp" i], input[name*="totp" i], ' +
-      'input[name*="code" i], input[name*="verification" i], input[name*="2fa" i], ' +
-      'input[aria-label*="verification" i], input[placeholder*="code" i]'
+        'input[name*="code" i], input[name*="verification" i], input[name*="2fa" i], ' +
+        'input[aria-label*="verification" i], input[placeholder*="code" i]',
     );
 
     for (const field of otpFields) {
       if (field.offsetParent !== null && !field.value) {
         clearInterval(interval);
-        // Generate the CURRENT 6-digit code from the seed and fill that —
-        // never type the raw TOTP secret into a form field (the old code did,
-        // which both failed the login and leaked the long-lived seed). If the
-        // value isn't a valid seed, generateTotp rejects and we fill nothing.
-        void generateTotp(totpSecret)
-          .then(({ code }) => {
-            if (code && !field.value) {
-              setInputValue(field, code);
-              flashField(field);
-            }
-          })
-          .catch(() => {
-            /* not a valid TOTP seed — do not fill anything */
-          });
+        fillOtpCode(field, totpSecret);
         return;
       }
     }
@@ -210,7 +332,7 @@ function setInputValue(input: HTMLInputElement, value: string): void {
 
   const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
-    "value"
+    "value",
   )?.set;
 
   if (nativeInputValueSetter) {

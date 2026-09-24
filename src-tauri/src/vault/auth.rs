@@ -44,6 +44,12 @@ const BRUTE_FORCE_FILE: &str = ".securenotes/brute_force.json";
 /// Internal state protected by a single mutex to avoid TOCTOU races.
 struct BruteForceState {
     failed_attempts: u32,
+    /// Attempts that passed [`BruteForceGuard::begin_attempt`] and have not
+    /// yet finished. Counted toward the threshold: without it, N concurrent
+    /// unlock calls all pass the check while `failed_attempts` is still below
+    /// it, and the guard throttles nothing until every one of them has
+    /// reported back.
+    in_flight: u32,
     last_attempt: Option<Instant>,
     /// Vault directory for persistence (set on first load).
     vault_dir: Option<std::path::PathBuf>,
@@ -54,6 +60,23 @@ pub struct BruteForceGuard {
     state: Mutex<BruteForceState>,
 }
 
+/// One unlock attempt that has passed the guard and is now running.
+///
+/// Held by the unlock command until it returns. Dropping it releases the
+/// in-flight slot, so a caller that leaves early (missing vault, keychain
+/// error, cancelled prompt) cannot leave the guard believing an attempt is
+/// still running.
+#[must_use = "bind the attempt for as long as the unlock is in progress"]
+pub struct Attempt<'a> {
+    guard: &'a BruteForceGuard,
+}
+
+impl Drop for Attempt<'_> {
+    fn drop(&mut self) {
+        self.guard.end_attempt();
+    }
+}
+
 impl BruteForceGuard {
     /// Create a guard with a clean slate (zero failures). Call [`Self::load_from_disk`]
     /// afterwards to restore any persisted throttle state for a specific vault.
@@ -61,6 +84,7 @@ impl BruteForceGuard {
         Self {
             state: Mutex::new(BruteForceState {
                 failed_attempts: 0,
+                in_flight: 0,
                 last_attempt: None,
                 vault_dir: None,
             }),
@@ -139,10 +163,15 @@ impl BruteForceGuard {
     /// Atomically check the delay AND stamp `last_attempt` to close the TOCTOU
     /// window between check_delay() and record_failure(). A concurrent caller
     /// will see the updated timestamp and be forced to wait.
-    pub fn begin_attempt(&self) -> Result<(), VaultError> {
+    ///
+    /// The returned [`Attempt`] must be held for as long as the unlock is in
+    /// progress: it is what counts the attempt as in flight, and dropping it
+    /// (on any return path) releases the slot.
+    pub fn begin_attempt(&self) -> Result<Attempt<'_>, VaultError> {
         let mut s = self.state.lock().map_err(|_| VaultError::LockPoisoned)?;
-        if s.failed_attempts >= MAX_ATTEMPTS_BEFORE_DELAY {
-            let delay_secs = Self::delay_for_attempt(s.failed_attempts);
+        let pending = s.failed_attempts.saturating_add(s.in_flight);
+        if pending >= MAX_ATTEMPTS_BEFORE_DELAY {
+            let delay_secs = Self::delay_for_attempt(pending);
             if let Some(last) = s.last_attempt {
                 let elapsed = last.elapsed();
                 let required = Duration::from_secs(delay_secs);
@@ -154,7 +183,14 @@ impl BruteForceGuard {
         }
         // Stamp the attempt time so concurrent callers see it immediately
         s.last_attempt = Some(Instant::now());
-        Ok(())
+        s.in_flight = s.in_flight.saturating_add(1);
+        Ok(Attempt { guard: self })
+    }
+
+    fn end_attempt(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.in_flight = s.in_flight.saturating_sub(1);
+        }
     }
 
     /// Record a failed attempt and persist to disk.
@@ -241,6 +277,35 @@ mod tests {
         assert_eq!(BruteForceGuard::delay_for_attempt(6), 2); // 2^1
         assert_eq!(BruteForceGuard::delay_for_attempt(7), 4); // 2^2
         assert_eq!(BruteForceGuard::delay_for_attempt(8), 8); // 2^3
+    }
+
+    /// Five concurrent attempts fill the threshold on their own: the sixth is
+    /// refused while the first five are still running, even though no failure
+    /// has been recorded yet.
+    #[test]
+    fn attempts_in_flight_count_toward_the_threshold() {
+        let guard = BruteForceGuard::new();
+        let held: Vec<Attempt<'_>> = (0..5).map(|_| guard.begin_attempt().unwrap()).collect();
+        assert!(
+            matches!(guard.begin_attempt(), Err(VaultError::BruteForceDelay(_))),
+            "a sixth concurrent attempt must wait"
+        );
+        drop(held);
+        // With every slot released and no failure recorded, the next attempt
+        // proceeds at once.
+        assert!(guard.begin_attempt().is_ok());
+    }
+
+    /// An attempt that ends without reporting a result still gives its slot
+    /// back, so an early return cannot wedge the guard.
+    #[test]
+    fn a_dropped_attempt_frees_its_slot() {
+        let guard = BruteForceGuard::new();
+        for _ in 0..20 {
+            let attempt = guard.begin_attempt().unwrap();
+            drop(attempt);
+        }
+        assert!(guard.begin_attempt().is_ok());
     }
 
     /// Biometric unlock shares the same BruteForceGuard as password unlock.

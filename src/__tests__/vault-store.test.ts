@@ -15,6 +15,7 @@ vi.mock("@/lib/commands", () => ({
   biometricStatus: vi.fn(),
   biometricUnlock: vi.fn(),
   biometricEnroll: vi.fn(),
+  biometricEnrolled: vi.fn(),
   biometricDisable: vi.fn(),
   biometricVerify: vi.fn(),
   touchActivity: vi.fn(),
@@ -187,6 +188,37 @@ describe("useVaultStore", () => {
     expect(useVaultStore.getState().biometricFailures).toBe(2);
   });
 
+  it("unlockWithBiometric shows why and hides the button when the app switched biometrics off", async () => {
+    useVaultStore.setState({ biometricAvailable: true, biometricMode: "primary" });
+    mockCmd.biometricUnlock.mockRejectedValue(
+      new Error(
+        "The biometric key saved on this device did not match this vault, so biometric unlock was switched off. Unlock with your password, then turn it back on in Settings › Security.",
+      ),
+    );
+    mockCmd.biometricAvailable.mockResolvedValue(true);
+    // Before the unlock the config cannot be read, so the keychain decides.
+    mockCmd.biometricStatus.mockRejectedValue(new Error("vault is locked"));
+    mockCmd.biometricEnrolled.mockResolvedValue(false);
+
+    const ok = await useVaultStore.getState().unlockWithBiometric("/vault");
+
+    expect(ok).toBe(false);
+    expect(useVaultStore.getState().error).toContain("switched off");
+    expect(useVaultStore.getState().biometricMode).toBe("disabled");
+    expect(mockCmd.biometricEnrolled).toHaveBeenCalledWith("/vault");
+  });
+
+  it("checkBiometric keeps the mode while the keychain still holds a key", async () => {
+    useVaultStore.setState({ biometricAvailable: true, biometricMode: "reauth" });
+    mockCmd.biometricAvailable.mockResolvedValue(true);
+    mockCmd.biometricStatus.mockRejectedValue(new Error("vault is locked"));
+    mockCmd.biometricEnrolled.mockResolvedValue(true);
+
+    await useVaultStore.getState().checkBiometric("/vault");
+
+    expect(useVaultStore.getState().biometricMode).toBe("reauth");
+  });
+
   it("unlockWithBiometric resets failures on success", async () => {
     useVaultStore.setState({ biometricFailures: 2 });
     mockCmd.biometricUnlock.mockResolvedValue(undefined);
@@ -199,16 +231,16 @@ describe("useVaultStore", () => {
   it("toggleBiometric enables mode", async () => {
     mockCmd.biometricEnroll.mockResolvedValue(undefined);
     mockCmd.getVaultConfig.mockResolvedValue(fakeConfig);
-    const ok = await useVaultStore.getState().toggleBiometric("/vault", "primary");
+    const ok = await useVaultStore.getState().toggleBiometric("primary");
     expect(ok).toBe(true);
     expect(useVaultStore.getState().biometricMode).toBe("primary");
-    expect(mockCmd.biometricEnroll).toHaveBeenCalledWith("/vault", "primary");
+    expect(mockCmd.biometricEnroll).toHaveBeenCalledWith("primary");
   });
 
   it("toggleBiometric disables mode", async () => {
     mockCmd.biometricDisable.mockResolvedValue(undefined);
     mockCmd.getVaultConfig.mockResolvedValue(fakeConfig);
-    const ok = await useVaultStore.getState().toggleBiometric("/vault", "disabled");
+    const ok = await useVaultStore.getState().toggleBiometric("disabled");
     expect(ok).toBe(true);
     expect(useVaultStore.getState().biometricMode).toBe("disabled");
   });

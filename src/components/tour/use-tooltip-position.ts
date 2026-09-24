@@ -15,6 +15,17 @@ const MARGIN = 16;
 const TOOLTIP_WIDTH = 280;
 const TOOLTIP_HEIGHT_ESTIMATE = 180;
 
+/** Whether the element is already fully within the viewport. */
+function isInViewport(el: Element): boolean {
+  const r = el.getBoundingClientRect();
+  return (
+    r.top >= 0 &&
+    r.left >= 0 &&
+    r.bottom <= window.innerHeight &&
+    r.right <= window.innerWidth
+  );
+}
+
 export function useTooltipPosition(
   targetSelector: string | null,
   preferredPlacement: Placement,
@@ -36,6 +47,17 @@ export function useTooltipPosition(
       setPosition(null);
       setTargetRect(null);
       return false;
+    }
+
+    // Bring the target into view before measuring it.
+    //
+    // Nothing did this, so a step whose target sat below the fold — the secret
+    // block, which lives well down a long help page — highlighted a box at the
+    // very bottom edge of the window while the tooltip talked about something
+    // the reader could not see. Scrolling first also keeps the measured rect
+    // honest, since it is measured after the scroll settles.
+    if (!isInViewport(el)) {
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
     }
 
     const rect = el.getBoundingClientRect();

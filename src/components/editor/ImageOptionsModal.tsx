@@ -2,20 +2,31 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 /**
- * ImageOptionsModal — image transform dialog for the editor's "insert with
- * options" flow.
+ * ImageOptionsModal — the "adjust image" step of the attach dialog.
  *
- * Lets the user pick an output format, resize percentage, rotation, and
+ * Lets the owner pick an output format, resize percentage, rotation and
  * (for JPEG/WebP) quality, with a debounced live preview and before/after
- * size info from the Rust backend. On insert it processes and saves the
- * transformed media into the vault and inserts the markdown image reference.
+ * sizes from the Rust backend. Nothing is changed unless the owner asks
+ * for it here. The vault's size limit applies to the output: an output over
+ * it cannot be attached until it is made smaller.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "@/lib/error-message";
-import { previewImageTransform, processAndSaveMedia } from "@/lib/commands";
+import {
+  previewImageTransform,
+  previewImageTransformBytes,
+  processAndSaveMedia,
+  processAndSaveMediaBytes,
+  type MediaFile,
+} from "@/lib/commands";
+import {
+  encryptionNote,
+  fileBytes,
+  formatSize,
+  type AttachSource,
+} from "@/lib/attachments";
 import { usePagesStore } from "@/stores/pages-store";
-import { insertImageMarkdown } from "./editor-api";
-import { CloseIcon } from "@/components/ui/icons";
+import { CloseIcon, LockClosedIcon, LockOpenIcon } from "@/components/ui/icons";
 import { useEscapeClose } from "@/hooks/use-escape-close";
 import type { ImageTransformParams, ImageTransformPreview } from "@claspt/shared/types";
 
@@ -29,19 +40,23 @@ const OUTPUT_FORMATS = [
 
 const ROTATIONS = [0, 90, 180, 270] as const;
 
-/** Human-readable byte size (B/KB/MB) for the original/output size labels. */
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** Image transform + insert dialog for a picked source file. */
+/** Image transform step for a file that is about to be attached. */
 export function ImageOptionsModal({
-  filePath,
+  source,
+  encrypt,
+  onEncryptChange,
+  limit,
+  onBack,
+  onDone,
   onClose,
 }: {
-  filePath: string;
+  source: AttachSource;
+  encrypt: boolean;
+  onEncryptChange: (encrypt: boolean) => void;
+  /** The vault's limit in bytes; the output must fit it. */
+  limit: number;
+  onBack: () => void;
+  onDone: (saved: MediaFile) => Promise<void>;
   onClose: () => void;
 }) {
   const folder = usePagesStore((s) => s.activePage?.meta.folder ?? "general");
@@ -56,8 +71,15 @@ export function ImageOptionsModal({
   const [error, setError] = useState<string | null>(null);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A pasted or dropped File is read once, for every preview and the save.
+  const bytesRef = useRef<Promise<number[]> | null>(null);
+  const bytes = useCallback((file: File) => {
+    if (!bytesRef.current) bytesRef.current = fileBytes(file);
+    return bytesRef.current;
+  }, []);
 
   const showQuality = format === "jpeg" || format === "webp";
+  const tooBig = preview !== null && preview.output_size > limit;
 
   const buildParams = useCallback(
     (): ImageTransformParams => ({
@@ -71,14 +93,21 @@ export function ImageOptionsModal({
     [format, percent, rotation, quality],
   );
 
-  // Fetch preview on param change (debounced)
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       setLoading(true);
       setError(null);
       try {
-        const result = await previewImageTransform(filePath, buildParams());
+        const params = buildParams();
+        const result =
+          source.kind === "path"
+            ? await previewImageTransform(source.path, params)
+            : await previewImageTransformBytes(
+                await bytes(source.file),
+                source.ext,
+                params,
+              );
         setPreview(result);
       } catch (e) {
         setError(errorMessage(e));
@@ -89,22 +118,26 @@ export function ImageOptionsModal({
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [filePath, buildParams]);
+  }, [source, buildParams, bytes]);
 
-  useEscapeClose(onClose);
+  useEscapeClose(onBack);
 
-  const handleInsert = async () => {
+  const handleAttach = async () => {
     setInserting(true);
     setError(null);
     try {
-      const mf = await processAndSaveMedia(folder, filePath, buildParams());
-      const name =
-        filePath
-          .split(/[/\\]/)
-          .pop()
-          ?.replace(/\.[^.]+$/, "") ?? "image";
-      insertImageMarkdown(name, mf.md_path);
-      onClose();
+      const params = buildParams();
+      const mf =
+        source.kind === "path"
+          ? await processAndSaveMedia(folder, source.path, params, encrypt)
+          : await processAndSaveMediaBytes(
+              folder,
+              await bytes(source.file),
+              source.ext,
+              params,
+              encrypt,
+            );
+      await onDone(mf);
     } catch (e) {
       setError(errorMessage(e));
       setInserting(false);
@@ -114,17 +147,18 @@ export function ImageOptionsModal({
   return (
     <div className="modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/50">
       <div className="modal-card flex w-[480px] flex-col overflow-hidden rounded-2xl border border-border/60 bg-surface shadow-2xl">
-        {/* Header */}
         <div className="flex items-center justify-between border-b border-border/60 px-6 py-4">
-          <h2 className="text-[13px] font-semibold text-text-primary">Image Options</h2>
-          <button onClick={onClose} className="icon-btn p-1 text-text-muted">
+          <h2 className="text-[13px] font-semibold text-text-primary">Adjust image</h2>
+          <button
+            onClick={onClose}
+            className="icon-btn p-1 text-text-muted"
+            aria-label="Close"
+          >
             <CloseIcon />
           </button>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-          {/* Preview */}
+        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
           <div className="flex items-center justify-center rounded-lg border border-border bg-surface-raised p-3">
             {preview ? (
               <img
@@ -132,32 +166,32 @@ export function ImageOptionsModal({
                 alt="Preview"
                 className="max-h-[200px] max-w-full object-contain"
               />
-            ) : loading ? (
-              <div className="flex h-[120px] items-center justify-center text-xs text-text-muted">
-                Loading preview...
-              </div>
             ) : (
               <div className="flex h-[120px] items-center justify-center text-xs text-text-muted">
-                No preview
+                {loading ? "Loading preview…" : "No preview"}
               </div>
             )}
           </div>
 
-          {/* Info row */}
           {preview && (
             <div className="flex justify-between text-[11px] text-text-muted">
               <span>
-                Original: {preview.original_width}x{preview.original_height},{" "}
+                Original: {preview.original_width}×{preview.original_height},{" "}
                 {formatSize(preview.original_size)}
               </span>
-              <span>
-                Output: {preview.output_width}x{preview.output_height},{" "}
+              <span className={tooBig ? "text-warning" : undefined}>
+                Output: {preview.output_width}×{preview.output_height},{" "}
                 {formatSize(preview.output_size)}
               </span>
             </div>
           )}
+          {tooBig && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-[12px] text-text-primary">
+              The output is {formatSize(preview.output_size)}; this vault&apos;s limit is{" "}
+              {formatSize(limit)}. Lower the size or the quality until it fits.
+            </p>
+          )}
 
-          {/* Format */}
           <div>
             <label className="mb-1 block text-xs font-medium text-text-muted">
               Format
@@ -179,7 +213,6 @@ export function ImageOptionsModal({
             </div>
           </div>
 
-          {/* Resize */}
           <div>
             <label className="mb-1 block text-xs font-medium text-text-muted">
               Resize: {percent}%
@@ -194,7 +227,6 @@ export function ImageOptionsModal({
             />
           </div>
 
-          {/* Rotate */}
           <div>
             <label className="mb-1 block text-xs font-medium text-text-muted">
               Rotate
@@ -216,7 +248,6 @@ export function ImageOptionsModal({
             </div>
           </div>
 
-          {/* Quality */}
           {showQuality && (
             <div>
               <label className="mb-1 block text-xs font-medium text-text-muted">
@@ -233,6 +264,24 @@ export function ImageOptionsModal({
             </div>
           )}
 
+          <label className="flex cursor-pointer items-start gap-2.5 border-t border-border/60 pt-4">
+            <input
+              type="checkbox"
+              checked={encrypt}
+              onChange={(e) => onEncryptChange(e.target.checked)}
+              className="mt-0.5 accent-accent"
+            />
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5 text-[13px] text-text-primary">
+                {encrypt ? <LockClosedIcon size={12} /> : <LockOpenIcon size={12} />}
+                Encrypt this file
+              </span>
+              <span className="mt-0.5 block text-[12px] leading-relaxed text-text-secondary">
+                {encryptionNote(encrypt)}
+              </span>
+            </span>
+          </label>
+
           {error && (
             <p className="rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">
               {error}
@@ -240,21 +289,28 @@ export function ImageOptionsModal({
           )}
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 border-t border-border/60 px-6 py-3">
+        <div className="flex items-center justify-between gap-2 border-t border-border/60 px-6 py-3">
           <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-1.5 text-[13px] text-text-secondary transition-all hover:bg-surface-overlay active:scale-95"
+            onClick={onBack}
+            className="text-[12px] text-text-secondary transition-colors hover:text-text-primary"
           >
-            Cancel
+            ← Back
           </button>
-          <button
-            onClick={handleInsert}
-            disabled={inserting || !preview}
-            className="rounded-lg bg-accent px-5 py-1.5 text-[13px] font-medium text-white transition-all hover:bg-accent-hover hover:shadow-md active:scale-95 disabled:opacity-50"
-          >
-            {inserting ? "Inserting..." : "Insert"}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-lg px-4 py-1.5 text-[13px] text-text-secondary transition-all hover:bg-surface-overlay active:scale-95"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleAttach}
+              disabled={inserting || !preview || tooBig}
+              className="rounded-lg bg-accent px-5 py-1.5 text-[13px] font-medium text-white transition-all hover:bg-accent-hover hover:shadow-md active:scale-95 disabled:opacity-50"
+            >
+              {inserting ? "Attaching…" : "Attach"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

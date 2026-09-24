@@ -24,6 +24,13 @@ export interface UseCase {
   detail: string;
   /** Ticked when the walkthrough opens. */
   defaultOn: boolean;
+  /**
+   * Needs a Pro licence, so the walkthrough cannot set it up. Shown, because
+   * someone choosing a vault should know the capability exists, but not
+   * selectable: ticking a box that silently does nothing is worse than not
+   * offering it.
+   */
+  pro?: boolean;
 }
 
 export const USE_CASES: UseCase[] = [
@@ -67,8 +74,9 @@ export const USE_CASES: UseCase[] = [
     title: "My phone and other computers",
     plain: "Keep your vault up to date on every device you use.",
     detail:
-      "Encrypted before it leaves this computer. Includes the iOS and Android apps. Part of Pro.",
+      "Encrypted before it leaves this computer, and the server never holds the key. Includes the iOS and Android apps.",
     defaultOn: false,
+    pro: true,
   },
 ];
 

@@ -155,7 +155,12 @@ export interface ApiStatus {
   /** Master key loaded? `false` means secret reads will return 403. */
   vault_unlocked: boolean;
   /** License tier or null if expired/missing. */
-  plan: "Free" | "Trial" | "Pro" | "Pro+" | string | null;
+  /**
+   * Shown in the extension's header. "Trial" and "Pro+" are gone: there is no
+   * trial, and one paid tier. `string` stays so an old desktop reporting
+   * either does not fail to parse.
+   */
+  plan: "Free" | "Pro" | string | null;
   /** "desktop" when the app is serving, "headless" under `claspt serve`. */
   mode: "desktop" | "headless";
   features: ApiFeatures;
@@ -260,6 +265,9 @@ export interface VaultConfig {
   help_pages_version?: string | null;
   /** SHA-256 verification hash of the master key (hex), for recovery key validation. */
   master_key_verify?: string | null;
+  /** Where this device last wrote the recovery key sheet — the path, not the key. */
+  recovery_key_saved_path?: string | null;
+  recovery_key_saved_at?: string | null;
   /** Tracks which tour version the user has completed. null/undefined = never seen. */
   tour_version_seen?: number | null;
   /**
@@ -274,6 +282,12 @@ export interface VaultConfig {
   window_height?: number | null;
   window_x?: number | null;
   window_y?: number | null;
+  /** Largest attachment this vault accepts, in MB (1–25, default 5). */
+  attachment_size_limit_mb?: number;
+  /** Days a deleted page waits in the trash before the unlock-time purge (7–90, default 30). */
+  trash_retention_days?: number;
+  /** The last answer to "encrypt this file?" in the attach dialog. */
+  attachment_encrypt_default?: boolean;
 }
 
 /** Search result. */
@@ -322,12 +336,7 @@ export interface VaultCreationResult {
  * user-provided {@link CsvColumnMapping}s; `Markdown` imports a single `.md` file.
  */
 export type ImportFormat =
-  | "LastPass"
-  | "OnePassword"
-  | "RoboForm"
-  | "KeePass"
-  | "GenericCsv"
-  | "Markdown";
+  "LastPass" | "OnePassword" | "RoboForm" | "KeePass" | "GenericCsv" | "Markdown";
 
 /** Auto-detected column mapping for Generic CSV import. */
 export interface CsvColumnMapping {
@@ -471,8 +480,7 @@ export interface ShareSecretPayload {
 
 /** Decrypted share content — either a page or a secret. */
 export type DecryptedShare =
-  | ({ type: "page" } & SharePagePayload)
-  | ({ type: "secret" } & ShareSecretPayload);
+  ({ type: "page" } & SharePagePayload) | ({ type: "secret" } & ShareSecretPayload);
 
 // ── Unified Check ──────────────────────────────────────
 
@@ -484,8 +492,6 @@ export interface PendingShare {
   from_device: string;
   created_at: string;
   expires_at: string;
-  /** Present for passwordless shares — the server holds the password so the recipient can auto-decrypt. */
-  share_password?: string;
   /** If true, the share is consumed (deleted) after first download. */
   burn_after_reading?: boolean;
 }
@@ -523,7 +529,8 @@ export interface LicenseStatus {
   tier: string | null;
   email: string | null;
   expires_at: string | null;
+  /** Days until an activated licence expires. Null when there is no licence. */
   days_remaining: number | null;
-  is_trial: boolean;
+  /** Whether an activated licence has expired. Free is not "expired". */
   is_expired: boolean;
 }

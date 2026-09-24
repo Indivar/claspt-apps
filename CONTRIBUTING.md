@@ -65,9 +65,8 @@ npx eslint src/ && npx prettier --check src/
 cd src-tauri && cargo clippy --all-targets && cargo fmt --check
 ```
 
-The browser extension lives in `browser-extension/`, the mobile app in
-`mobile/`, shared TypeScript in `shared/`, and the sync server in `server/`.
-Each has its own `package.json` and test command.
+The browser extension lives in `browser-extension/` and shared TypeScript in
+`shared/`. Each has its own `package.json` and test command.
 
 ## Versioning
 
@@ -116,7 +115,7 @@ verifies them and `--fix` adds one to a new file; CI runs the check.
 
 The public repository is a snapshot of this project's public subset; the
 commercial modules (sync, sharing, the licence system, the mobile apps and the
-server) live only in the private repository. `.publicignore` is the single
+server) live only in the private repository, which holds the single
 definition of that boundary. Contributions to the public repository are merged
 into the private one; fixes made privately are cherry-picked out, which only
 works when every commit stays on one side of the boundary. With the hooks

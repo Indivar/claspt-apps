@@ -7,8 +7,8 @@
  * progress and relaunching the app when finished. Dismissible per the share store.
  */
 import { useCallback, useEffect, useState } from "react";
+import { installUpdate } from "@/lib/updater";
 import { check } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { useShareStore } from "@/stores/share-store";
 import { APP_VERSION } from "@/lib/version";
 
@@ -46,21 +46,10 @@ export function UpdateBanner() {
   const handleInstall = useCallback(async () => {
     if (!updateRef) return;
     setState("downloading");
-    let totalBytes = 0;
-    let downloadedBytes = 0;
-    await updateRef.downloadAndInstall((event) => {
-      if (event.event === "Started" && event.data.contentLength) {
-        totalBytes = event.data.contentLength;
-      } else if (event.event === "Progress") {
-        downloadedBytes += event.data.chunkLength;
-        if (totalBytes > 0) {
-          setProgress(Math.round((downloadedBytes / totalBytes) * 100));
-        }
-      } else if (event.event === "Finished") {
-        setState("ready");
-      }
+    await installUpdate(updateRef, (p) => {
+      if (p.percent !== null) setProgress(p.percent);
+      if (p.finished) setState("ready");
     });
-    await relaunch();
   }, [updateRef]);
 
   if (state === "idle" || updateDismissed) return null;

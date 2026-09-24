@@ -13,21 +13,15 @@
  */
 import {
   BRIDGE_MESSAGE_SOURCE,
-  PAGE_MESSAGE_SOURCE,
   type BridgeReply,
+  PAGE_MESSAGE_SOURCE,
   type PageRequest,
   type PasskeyCandidate,
+  type PasskeyCreateRequest,
   type PasskeyGetRequest,
+  rpIdAllowedForHost,
 } from "@/shared/passkey-codec";
 import type { Message } from "@/shared/types";
-
-function injectProvider() {
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("src/page/passkey-provider.js");
-  script.async = false;
-  (document.head || document.documentElement).appendChild(script);
-  script.remove();
-}
 
 function reply(message: BridgeReply) {
   window.postMessage(message, window.location.origin);
@@ -98,11 +92,27 @@ export function pickPasskey(
 
 async function handle(page: PageRequest): Promise<BridgeReply> {
   const base = { source: BRIDGE_MESSAGE_SOURCE, id: page.id } as const;
+
+  // The request came from the page, and any script on the page can post one
+  // with whatever origin and RP ID it likes. The origin is therefore replaced
+  // with the frame's own, and the RP ID is checked against the frame's host
+  // before the vault ever hears about it. A request that fails the check falls
+  // back to the browser, which will refuse it for the same reason.
+  const origin = window.location.origin;
+  const host = window.location.hostname;
+
   if (page.kind === "create") {
-    const response = await sendToBackground({
-      type: "PASSKEY_CREATE",
-      request: page.request as never,
-    });
+    const incoming = page.request as Partial<PasskeyCreateRequest> | undefined;
+    const rpId = incoming?.rp?.id;
+    if (typeof rpId !== "string" || !rpIdAllowedForHost(host, rpId)) {
+      return { ...base, outcome: "fallback" };
+    }
+    const request: PasskeyCreateRequest = {
+      ...(incoming as PasskeyCreateRequest),
+      origin,
+      cross_origin: false,
+    };
+    const response = await sendToBackground({ type: "PASSKEY_CREATE", request });
     if (!response || response.type !== "PASSKEY_RESULT")
       return { ...base, outcome: "fallback" };
     return {
@@ -112,7 +122,15 @@ async function handle(page: PageRequest): Promise<BridgeReply> {
       error: response.error,
     };
   }
-  let request = page.request as PasskeyGetRequest;
+  const incoming = page.request as Partial<PasskeyGetRequest> | undefined;
+  if (typeof incoming?.rp_id !== "string" || !rpIdAllowedForHost(host, incoming.rp_id)) {
+    return { ...base, outcome: "fallback" };
+  }
+  let request: PasskeyGetRequest = {
+    ...(incoming as PasskeyGetRequest),
+    origin,
+    cross_origin: false,
+  };
   let response = await sendToBackground({ type: "PASSKEY_GET", request });
   if (response?.type === "PASSKEY_CHOOSE") {
     const choice = await pickPasskey(response.candidates, request.rp_id);
@@ -130,9 +148,14 @@ async function handle(page: PageRequest): Promise<BridgeReply> {
   };
 }
 
+// The page-world provider (`src/page/passkey-provider.ts`) is declared in the
+// manifest as a `world: "MAIN"` content script, so the browser runs it in the
+// page before page scripts and nothing of the extension has to be
+// web-accessible for it. It used to be injected from here through a script
+// tag pointing at a web-accessible resource, which any page could fetch to
+// learn the extension was installed.
 function start() {
   if (window !== window.top) return;
-  injectProvider();
   window.addEventListener("message", (event: MessageEvent) => {
     if (event.source !== window) return;
     const data = event.data as PageRequest | undefined;

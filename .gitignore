@@ -26,27 +26,12 @@ Thumbs.db
 *.log
 
 # Server runtime data
-server/data/
 data/
 
 # Rust build (workspace-level)
 target/
 .superpowers/
 
-# Security audit working notes — names credential locations; must not be published
-docs/security/
-
-# Local AI-tooling state: per-machine, never part of the product
-.claude/
-.serena/
-.remember/
-.harness/
-
 # Session log dumps
 logs.txt
 
-# Internal infrastructure reference: names credentials and hosts; kept locally, never published
-docs/deployment/infrastructure-reference.md
-
-# A screenshot of the live vault was once tracked here; never again
-/Screenshot*.png

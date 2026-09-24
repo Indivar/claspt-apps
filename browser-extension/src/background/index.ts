@@ -7,12 +7,14 @@ import { CredentialCache } from "./credential-cache";
 import { HealthCheck } from "./health-check";
 import { createMessageHandler } from "./message-handler";
 import { LoginJobRunner } from "./login-jobs";
+import { flushGeneratedOutbox } from "./generated-outbox";
+import { countCaptured, flushCaptureOutbox, parkedCaptureCount } from "./capture-store";
+import { applyActionState, type ActionState } from "./action-state";
 import type { ExtensionConfig, RecentCredential } from "@/shared/types";
 import { DEFAULT_CONFIG } from "@/shared/types";
 import {
   STORAGE_KEY_CONFIG,
   STORAGE_KEY_RECENT,
-  STORAGE_KEY_UNSAVED,
   HEALTH_CHECK_ALARM,
   CLIPBOARD_CLEAR_ALARM,
   AUTO_LOCK_ALARM,
@@ -40,11 +42,16 @@ import type { Credential } from "@/shared/types";
 // Service worker — no console.log in production
 
 let config: ExtensionConfig = { ...DEFAULT_CONFIG };
-let api = new ApiClient(config);
-let cache = new CredentialCache(api);
-let health = new HealthCheck(api);
+const api = new ApiClient(config);
+const cache = new CredentialCache(api);
+const health = new HealthCheck(api);
 /** Whether the extension is "locked" (user must reconnect/re-authenticate). */
 let extensionLocked = false;
+
+/** Whether a pairing token carries Secrets scope (`clss_`) rather than Notes (`clsn_`). */
+function isSecretsToken(token: string): boolean {
+  return token.startsWith("clss_");
+}
 
 // Fills requested by an agent through the desktop, after the owner approved
 // them there. Runs only while connected and unlocked.
@@ -77,6 +84,14 @@ const loginJobs = new LoginJobRunner(
     activeTab: async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       return tab?.id && tab.url ? { id: tab.id, url: tab.url } : null;
+    },
+    tabUrl: async (tabId) => {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        return tab?.url ?? null;
+      } catch {
+        return null;
+      }
     },
     fill: async (tabId, credential, submit) => {
       const result = (await chrome.tabs.sendMessage(tabId, {
@@ -120,18 +135,13 @@ async function credentialsForTabUrl(url: string): Promise<Credential[]> {
   return cache.getCredentialsForUrl(url);
 }
 
-// Allow content scripts (untrusted contexts) to read/write session storage.
-// The unsaved-credentials queue (cleartext, not-yet-saved passwords) and the
-// pending-save handoff are written from the content script and read from the
-// popup. By default session storage is TRUSTED_CONTEXTS-only, which would make
-// content-script writes silently fail. We keep this data in session (not local)
-// storage so it stays memory-backed and never touches disk.
-chrome.storage.session
-  .setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" as chrome.storage.AccessLevel })
-  .catch(() => {
-    // Older browsers may not support setAccessLevel — the queue still works
-    // from trusted contexts; content-script writes just won't be visible.
-  });
+// Session storage stays at its default, trusted-contexts-only access level.
+// It holds cleartext captured passwords (the pending save, the unsaved queue,
+// the generated-password outbox); the worker writes and reads them on behalf
+// of content scripts through messages that bind each record to the sender's
+// own site (see session-store.ts). Opening the area to untrusted contexts,
+// which is what this used to do, let the content script on any origin read
+// every other site's captured passwords.
 
 /**
  * Check whether the user has granted the optional host permission for our
@@ -200,17 +210,14 @@ function lockExtension() {
   // local-API credential. It is restored from `config` on the next health tick
   // (see the HEALTH_CHECK_ALARM handler) so auto-unlock still works.
   api.clearToken();
-  // Wipe cleartext, not-yet-saved credentials and any pending-save handoff.
-  // These live in memory-backed session storage; clearing on lock ensures a
-  // locked extension retains no plaintext passwords.
+  // Drop the save bar's handoff: it holds the submitted password in session
+  // memory, and a locked extension keeps no plaintext password it can avoid.
   //
-  // The generated-password outbox is deliberately NOT cleared here. It holds
-  // passwords that could not reach the vault yet, and dropping them on lock is
-  // how a generated password used to be lost — the vault is where they belong,
-  // and they are flushed there as soon as it is reachable again.
-  chrome.storage.session
-    .remove([STORAGE_KEY_UNSAVED, "claspt_pending_save"])
-    .catch(() => {});
+  // The generated-password outbox and the capture outbox are deliberately
+  // NOT cleared. They hold passwords that could not reach the vault yet, and
+  // dropping them on lock is how a password used to be lost. The vault is
+  // where they belong, and they are written there on the next reconnection.
+  chrome.storage.session.remove("claspt_pending_save").catch(() => {});
   // Also drop the recently-used metadata (usernames + domains) from disk on
   // lock — it's account-linkage data that a locked vault shouldn't retain.
   chrome.storage.local.remove(STORAGE_KEY_RECENT).catch(() => {});
@@ -229,14 +236,17 @@ function unlockExtension() {
 
 // ── Recently Used Tracking ─────────────────────────
 
-async function recordRecentUse(pagePath: string, label: string, domain: string, username: string) {
+async function recordRecentUse(
+  pagePath: string,
+  label: string,
+  domain: string,
+  username: string,
+) {
   const result = await chrome.storage.local.get(STORAGE_KEY_RECENT);
   const recent: RecentCredential[] = result[STORAGE_KEY_RECENT] ?? [];
 
   // Remove existing entry for same credential
-  const filtered = recent.filter(
-    (r) => !(r.pagePath === pagePath && r.label === label)
-  );
+  const filtered = recent.filter((r) => !(r.pagePath === pagePath && r.label === label));
 
   // Add to front
   filtered.unshift({ pagePath, label, domain, username, timestamp: Date.now() });
@@ -286,7 +296,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
           credential: credentials[0],
         });
         const c = credentials[0];
-        recordRecentUse(c.pagePath, c.label, c.fields["url"] ?? "", c.fields["username"] ?? "");
+        recordRecentUse(
+          c.pagePath,
+          c.label,
+          c.fields["url"] ?? "",
+          c.fields["username"] ?? "",
+        );
       }
     } catch {
       // No credentials found
@@ -296,12 +311,25 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "claspt-generate") {
     // Use the inline-icon generator's persisted prefs so right-clicking is
     // consistent with the dropdown the user already configured.
-    const stored = await new Promise<Partial<{ length: number; uppercase: boolean; lowercase: boolean; digits: boolean; symbols: boolean; excludeAmbiguous: boolean; excludeProblematic: boolean; maxSymbols: number }>>((resolve) => {
+    const stored = await new Promise<
+      Partial<{
+        length: number;
+        uppercase: boolean;
+        lowercase: boolean;
+        digits: boolean;
+        symbols: boolean;
+        excludeAmbiguous: boolean;
+        excludeProblematic: boolean;
+        maxSymbols: number;
+      }>
+    >((resolve) => {
       try {
         chrome.storage.local.get("claspt_inline_gen_prefs", (data) => {
           resolve(data?.["claspt_inline_gen_prefs"] ?? {});
         });
-      } catch { resolve({}); }
+      } catch {
+        resolve({});
+      }
     });
     const pw = generatePassword({
       length: stored.length ?? 20,
@@ -324,21 +352,65 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         chrome.tabs.sendMessage(tab.id, { type: "CLIPBOARD_WRITE", text: pw });
         scheduleClipboardClear();
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   if (info.menuItemId === "claspt-copy-username") {
     try {
       const credentials = await credentialsForTabUrl(tab.url);
-      const user = credentials[0]?.fields["username"] ?? credentials[0]?.fields["email"] ?? "";
+      const user =
+        credentials[0]?.fields["username"] ?? credentials[0]?.fields["email"] ?? "";
       if (user) {
         chrome.tabs.sendMessage(tab.id, { type: "CLIPBOARD_WRITE", text: user });
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 });
 
+/** How many times a clear has been attempted without a tab able to do it. */
+let clipboardClearAttempts = 0;
+const CLIPBOARD_CLEAR_MAX_ATTEMPTS = 6;
+
+/**
+ * Clear the clipboard through the active tab, and try again shortly if no tab
+ * could do it.
+ *
+ * The clear used to be sent once and forgotten. On a chrome:// page, the Web
+ * Store, or an unfocused window there is no content script to receive it, or
+ * the write is refused for lack of focus, and a copied password stayed on
+ * the clipboard while the UI implied it had been cleared. Without the
+ * clipboardRead permission the extension cannot check what is there first,
+ * so a clear replaces whatever the clipboard holds at that moment; the
+ * setting says so.
+ */
+async function clearClipboardOrRetry() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let delivered = false;
+  if (tab?.id) {
+    try {
+      const reply = await chrome.tabs.sendMessage(tab.id, {
+        type: "CLIPBOARD_WRITE",
+        text: "",
+      });
+      delivered = reply?.type === "CLIPBOARD_WRITTEN" ? reply.ok === true : true;
+    } catch {
+      delivered = false;
+    }
+  }
+  if (delivered || clipboardClearAttempts >= CLIPBOARD_CLEAR_MAX_ATTEMPTS) {
+    clipboardClearAttempts = 0;
+    return;
+  }
+  clipboardClearAttempts += 1;
+  chrome.alarms.create(CLIPBOARD_CLEAR_ALARM, { delayInMinutes: 0.25 });
+}
+
 function scheduleClipboardClear() {
+  clipboardClearAttempts = 0;
   if (config.clipboardTimeout > 0) {
     chrome.alarms.create(CLIPBOARD_CLEAR_ALARM, {
       delayInMinutes: config.clipboardTimeout / 60,
@@ -348,25 +420,51 @@ function scheduleClipboardClear() {
 
 // ── Badge Match Count ──────────────────────────────
 
-async function updateBadgeForTab(tabId: number, url: string) {
-  if (health.getState() !== "connected" || extensionLocked) {
-    chrome.action.setBadgeText({ text: "", tabId });
-    return;
-  }
+/**
+ * Captured logins waiting for a decision. Counted after every change and on
+ * every health check, so the badge and the hover text need no vault call of
+ * their own when a tab changes.
+ */
+let waitingCount = 0;
 
+async function refreshWaitingCount(): Promise<void> {
   try {
-    const credentials = await credentialsForTabUrl(url);
-    const count = credentials.length;
-    chrome.action.setBadgeText({
-      text: count > 0 ? String(count) : "",
-      tabId,
-    });
-    chrome.action.setBadgeBackgroundColor({
-      color: "#d4930a",
-      tabId,
-    });
+    const parked = await parkedCaptureCount();
+    const inVault =
+      health.getState() === "connected" && !extensionLocked ? await countCaptured(api) : 0;
+    waitingCount = parked + inVault;
   } catch {
-    chrome.action.setBadgeText({ text: "", tabId });
+    // Keep the last count; the next check corrects it.
+  }
+}
+
+function actionStateNow(): ActionState {
+  if (extensionLocked) return "extension_locked";
+  return health.getState();
+}
+
+async function updateBadgeForTab(tabId: number, url: string) {
+  const state = actionStateNow();
+  let matches = 0;
+  if (state === "connected") {
+    try {
+      matches = (await credentialsForTabUrl(url)).length;
+    } catch {
+      matches = 0;
+    }
+  }
+  await applyActionState({ state, matches, waiting: waitingCount }, tabId);
+}
+
+/** Re-apply the toolbar state after the waiting count changed. */
+async function onCapturesChanged(): Promise<void> {
+  await refreshWaitingCount();
+  updateGlobalBadge(health.getState());
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id !== undefined && tab.url) await updateBadgeForTab(tab.id, tab.url);
+  } catch {
+    // No active tab to refresh.
   }
 }
 
@@ -427,21 +525,20 @@ chrome.runtime.onStartup.addListener(async () => {
 // ── Alarms ─────────────────────────────────────────
 
 function updateGlobalBadge(state: string) {
-  if (extensionLocked) {
-    chrome.action.setBadgeText({ text: "!" });
-    chrome.action.setBadgeBackgroundColor({ color: "#eab308" });
-    return;
-  }
-  if (state === "connected") {
-    chrome.action.setBadgeText({ text: "" });
-    chrome.action.setBadgeBackgroundColor({ color: "#22c55e" });
-  } else if (state === "vault_locked") {
-    chrome.action.setBadgeText({ text: "!" });
-    chrome.action.setBadgeBackgroundColor({ color: "#eab308" });
-  } else {
-    chrome.action.setBadgeText({ text: "X" });
-    chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
-  }
+  const known: ActionState[] = [
+    "connected",
+    "vault_locked",
+    "disconnected",
+    "permission_needed",
+    "desktop_too_old",
+    "unauthorized",
+  ];
+  const resolved: ActionState = extensionLocked
+    ? "extension_locked"
+    : known.includes(state as ActionState)
+      ? (state as ActionState)
+      : "disconnected";
+  void applyActionState({ state: resolved, matches: 0, waiting: waitingCount });
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -470,7 +567,20 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       unlockExtension();
       updateGlobalBadge(newState);
     }
-    if (newState === "connected" && !extensionLocked) {
+    // The vault is back: write whatever was generated or captured while it
+    // was away, then count what is waiting so the toolbar says so.
+    if (prevState !== "connected" && newState === "connected") {
+      void flushGeneratedOutbox(api);
+      void flushCaptureOutbox(api, (url) => cache.getCredentialsForUrl(url)).then(() =>
+        onCapturesChanged(),
+      );
+    } else {
+      void refreshWaitingCount().then(() => updateGlobalBadge(newState));
+    }
+    // Login jobs deliver decrypted credentials, and the desktop refuses the
+    // poll from a notes-scope pairing, so a notes-scope extension does not
+    // start the poll at all rather than retrying a 403 forever.
+    if (newState === "connected" && !extensionLocked && isSecretsToken(config.token)) {
       loginJobs.ensure();
     } else {
       loginJobs.stop();
@@ -478,10 +588,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 
   if (alarm.name === CLIPBOARD_CLEAR_ALARM) {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) {
-      chrome.tabs.sendMessage(tab.id, { type: "CLIPBOARD_WRITE", text: "" });
-    }
+    await clearClipboardOrRetry();
   }
 
   if (alarm.name === AUTO_LOCK_ALARM) {
@@ -497,6 +604,7 @@ const handler = createMessageHandler(
   () => health,
   () => config,
   onConfigChange,
+  () => void onCapturesChanged(),
 );
 
 // Wrap handler to reset auto-lock timer on any user interaction
@@ -506,7 +614,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Track recently used on fill
   if (message.type === "FILL_CREDENTIAL" && message.credential) {
     const c = message.credential;
-    recordRecentUse(c.pagePath, c.label, c.fields?.["url"] ?? "", c.fields?.["username"] ?? "");
+    recordRecentUse(
+      c.pagePath,
+      c.label,
+      c.fields?.["url"] ?? "",
+      c.fields?.["username"] ?? "",
+    );
   }
 
   return handler(message, sender, sendResponse);
@@ -529,7 +642,12 @@ chrome.commands.onCommand.addListener(async (command) => {
           credential: credentials[0],
         });
         const c = credentials[0];
-        recordRecentUse(c.pagePath, c.label, c.fields["url"] ?? "", c.fields["username"] ?? "");
+        recordRecentUse(
+          c.pagePath,
+          c.label,
+          c.fields["url"] ?? "",
+          c.fields["username"] ?? "",
+        );
       }
     } catch {
       // Ignore

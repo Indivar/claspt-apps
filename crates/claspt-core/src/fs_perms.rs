@@ -24,8 +24,8 @@
 //! vault key. Directories get the ACE with container-and-object inheritance so
 //! files created inside them start owner-only too.
 
-use std::io;
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 /// Make `path` readable and writable by the current user only.
 ///
@@ -34,6 +34,69 @@ use std::path::Path;
 /// temporary file before renaming it into place.
 pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
     imp::restrict_to_owner(path)
+}
+
+/// Create `path` so that it is owner-only from its first instant.
+///
+/// A writer that creates a file and restricts it afterwards leaves a window in
+/// which the file has the umask's permissions. That window is short but it is
+/// not harmless: another local user who opens the file inside it keeps the
+/// descriptor, and a descriptor survives the later chmod, so the bytes written
+/// afterwards are readable through it. On Unix the mode is therefore part of
+/// the `open(2)` call itself. On Windows the file is created empty and its
+/// DACL is replaced before any bytes are written; a handle opened in between
+/// sees an empty file. Both branches create with `create_new`, so a file
+/// (or symlink) planted at the path beforehand fails the call rather than
+/// being written through; a leftover temporary from an earlier crash is
+/// removed first.
+pub fn create_owner_only(path: &Path) -> io::Result<std::fs::File> {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != io::ErrorKind::NotFound {
+            return Err(e);
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    restrict_to_owner(path)?;
+    Ok(file)
+}
+
+/// Write `data` to `path` atomically and owner-only.
+///
+/// The bytes go to a sibling temporary file made by [`create_owner_only`], are
+/// flushed to the disk with `sync_all`, and the temporary is renamed over
+/// `path`. A crash or power loss at any point leaves either the previous file
+/// or the complete new one, never a truncated one, which matters most for
+/// `vault.key`: a half-written key file is a vault nobody can open.
+pub fn write_owner_only(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp_path = temp_sibling(path);
+    let written = create_owner_only(&tmp_path).and_then(|mut file| {
+        file.write_all(data)?;
+        file.sync_all()
+    });
+    let result = written.and_then(|()| std::fs::rename(&tmp_path, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// `<name>.tmp` beside `path`. The suffix is appended rather than swapped for
+/// the extension so `vault.key` and `vault.json` cannot share a temporary, and
+/// so every temporary matches the `*.tmp` rule in the vault's `.gitignore`.
+fn temp_sibling(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".tmp");
+    path.with_file_name(name)
 }
 
 #[cfg(unix)]
@@ -302,6 +365,60 @@ mod tests {
         std::fs::write(sub.join("child"), b"z").unwrap();
         // And a file created inside the directory inherits owner-only.
         assert_eq!(imp::dacl_shape(&sub.join("child")).unwrap().0, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_are_owner_only_from_creation_and_writes_are_atomic() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("vault.key");
+
+        write_owner_only(&target, b"first").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+        assert!(
+            !dir.path().join("vault.key.tmp").exists(),
+            "temporary left behind"
+        );
+
+        // A rewrite replaces the content in one step and stays owner-only.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_owner_only(&target, b"second").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read(&target).unwrap(), b"second");
+    }
+
+    #[test]
+    fn a_planted_symlink_at_the_temporary_is_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("vault.key");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"untouched").unwrap();
+        // A stale temporary is removed and recreated, so a symlink left there
+        // is replaced by a real file rather than followed.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join("vault.key.tmp")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&elsewhere, dir.path().join("vault.key.tmp")).unwrap();
+
+        write_owner_only(&target, b"secret").unwrap();
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"untouched");
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn temporaries_keep_the_whole_file_name() {
+        assert_eq!(
+            temp_sibling(Path::new("/v/.securenotes/vault.key")),
+            PathBuf::from("/v/.securenotes/vault.key.tmp")
+        );
+        assert_eq!(
+            temp_sibling(Path::new("/v/.securenotes/config.json")),
+            PathBuf::from("/v/.securenotes/config.json.tmp")
+        );
     }
 
     #[test]

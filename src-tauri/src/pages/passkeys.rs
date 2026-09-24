@@ -164,6 +164,89 @@ pub fn list(
         .collect())
 }
 
+/// Every passkey in the vault, for the management screen.
+///
+/// `list` answers "which credentials may this site offer", so it needs an
+/// `rp_id` and is called during a sign-in. A person asking "what passkeys do
+/// I have" has no rp_id to give, which is why that question could not be
+/// asked at all before this existed.
+///
+/// Pages are read one at a time and a page that will not decrypt is skipped
+/// rather than failing the listing: one damaged page must not hide every
+/// other passkey the person owns.
+pub fn list_all(vault_dir: &Path, master_key: &[u8]) -> Result<Vec<PasskeySummary>, PageError> {
+    let mut pages = Vec::new();
+    let _ = crud::walk_vault_pages(vault_dir, |rel_path, meta, content| {
+        if meta.folder == FOLDER {
+            pages.push((rel_path, content));
+        }
+    });
+    pages.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out = Vec::new();
+    for (page_path, content) in pages {
+        let Ok(decrypted) = secret::decrypt_secrets(&content, master_key) else {
+            continue;
+        };
+        for (label, fields) in secret::list_blocks(&decrypted) {
+            if field(&fields, "type") != Some(TYPE_FIELD_VALUE) {
+                continue;
+            }
+            let Some(credential_id) = field(&fields, "credential_id") else {
+                continue;
+            };
+            out.push(PasskeySummary {
+                page_path: page_path.clone(),
+                label: label.clone(),
+                rp_id: field(&fields, "rp_id").unwrap_or("").to_string(),
+                rp_name: field(&fields, "rp_name").unwrap_or("").to_string(),
+                credential_id: credential_id.to_string(),
+                user_name: field(&fields, "user_name").unwrap_or("").to_string(),
+                user_display_name: field(&fields, "user_display_name")
+                    .unwrap_or("")
+                    .to_string(),
+                created: field(&fields, "created").unwrap_or("").to_string(),
+                last_used: field(&fields, "last_used").map(str::to_string),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Remove one passkey.
+///
+/// Keyed on the credential id rather than the block label because two
+/// accounts on one site can carry the same label, and deleting a key is not
+/// recoverable: the site will keep offering a credential that no longer
+/// exists here, and the person has to re-register. Matching on the id means
+/// the block deleted is the block shown.
+pub fn delete(
+    vault_dir: &Path,
+    master_key: &[u8],
+    page_path: &str,
+    credential_id: &str,
+) -> Result<(), PageError> {
+    let page = crud::read_page(vault_dir, page_path)?;
+    let decrypted = secret::decrypt_for_page(page.meta.encrypted, &page.content, master_key)?;
+
+    let label = secret::list_blocks(&decrypted)
+        .into_iter()
+        .find(|(_, fields)| {
+            field(fields, "type") == Some(TYPE_FIELD_VALUE)
+                && field(fields, "credential_id") == Some(credential_id)
+        })
+        .map(|(label, _)| label)
+        .ok_or_else(|| {
+            PageError::SecretBlock(format!("no passkey with credential id {credential_id}"))
+        })?;
+
+    let result = secret::delete_block(&decrypted, &label)
+        .map_err(|e| PageError::SecretBlock(format!("{e:?}")))?;
+    let encrypted = secret::encrypt_for_page(page.meta.encrypted, &result.content, master_key)?;
+    crud::update_page(vault_dir, page_path, &encrypted)?;
+    Ok(())
+}
+
 fn write_block(
     vault_dir: &Path,
     master_key: &[u8],
@@ -178,10 +261,14 @@ fn write_block(
             (page.path, String::new())
         }
     };
-    let decrypted = secret::decrypt_secrets(&content, master_key)?;
+    // The page may have been switched to full-body encryption by hand.
+    let full_body = crud::read_page(vault_dir, &page_path)
+        .map(|p| p.meta.encrypted)
+        .unwrap_or(false);
+    let decrypted = secret::decrypt_for_page(full_body, &content, master_key)?;
     let patched = secret::patch_block(&decrypted, label, fields, &[], true)
         .map_err(|e| PageError::SecretBlock(format!("{e:?}")))?;
-    let encrypted = secret::encrypt_secrets(&patched.content, master_key)?;
+    let encrypted = secret::encrypt_for_page(full_body, &patched.content, master_key)?;
     crud::update_page_with_meta(vault_dir, &page_path, &encrypted, |meta| {
         if !meta.tags.iter().any(|t| t == TAG) {
             meta.tags.push(TAG.to_string());

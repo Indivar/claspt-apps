@@ -60,8 +60,8 @@ connection_string: rediss://:rEdIs_PrOd_2026_sEcUrE_tOkEn_xYz@prod-cache.example
 ## API Keys
 
 :::secret[Stripe Production]
-publishable_key: pk_live_51Example7890abcdefghijklmnopqrstuvwxyz
-secret_key: sk_live_51Example0987654321zyxwvutsrqponmlkjihg
+publishable_key: pk_test_51Example7890abcdefghijklmnopqrstuvwxyz
+secret_key: sk_test_51Example0987654321zyxwvutsrqponmlkjihg
 webhook_secret: whsec_ExAmPlE1234567890abcdefghijklmnop
 :::
 

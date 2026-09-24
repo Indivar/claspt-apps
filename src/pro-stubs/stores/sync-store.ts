@@ -6,6 +6,7 @@
  * at once; status stays "not configured". See src/pro-stubs/README.md.
  */
 import { create } from "zustand";
+import type { MergeNotice, ResolvedPage, SyncProgress } from "@/lib/commands";
 import type { ConflictInfo, SyncResolution, SyncStatus } from "@claspt/shared/types";
 
 /**
@@ -30,6 +31,17 @@ export interface V2Status {
   device_id?: string;
   last_synced_version?: number;
   server_url?: string;
+  merge_notices_pending?: number;
+  vault_mismatch?: { local: string; remote: string } | null;
+}
+
+/** Mirrors the real result; this build never produces one. */
+interface AdoptAccountVaultResult {
+  previous_vault_id: string | null;
+  vault_id: string;
+  biometric: "moved" | "off" | "none";
+  pushed_version: number | null;
+  push_error: string | null;
 }
 
 interface SyncStore {
@@ -40,6 +52,12 @@ interface SyncStore {
   error: string | null;
   v2Status: V2Status | null;
   devicesV2: DeviceInfo[];
+  mergeNotices: MergeNotice[];
+  mergeNoticesOpen: boolean;
+  identityDialogOpen: boolean;
+  identityDismissed: string | null;
+  identityProgress: SyncProgress | null;
+  identityStartedAt: number | null;
   fetchStatus: () => Promise<void>;
   syncNow: () => Promise<void>;
   configure: (
@@ -58,6 +76,13 @@ interface SyncStore {
   fetchDevicesV2: () => Promise<void>;
   removeDeviceV2: (deviceId: string) => Promise<void>;
   disableV2: () => Promise<void>;
+  fetchMergeNotices: () => Promise<void>;
+  dismissMergeNotices: () => Promise<void>;
+  setMergeNoticesOpen: (open: boolean) => void;
+  announceResolved: (resolved: ResolvedPage[]) => Promise<void>;
+  setIdentityDialogOpen: (open: boolean) => void;
+  adoptAccountVault: (password: string) => Promise<AdoptAccountVaultResult | null>;
+  retryFreshCopy: () => Promise<{ version: number; bytes_uploaded: number } | null>;
 }
 
 const done = async () => {};
@@ -70,6 +95,12 @@ export const useSyncStore = create<SyncStore>((set) => ({
   error: null,
   v2Status: null,
   devicesV2: [],
+  mergeNotices: [],
+  mergeNoticesOpen: false,
+  identityDialogOpen: false,
+  identityDismissed: null,
+  identityProgress: null,
+  identityStartedAt: null,
   fetchStatus: done,
   syncNow: done,
   configure: done,
@@ -84,4 +115,11 @@ export const useSyncStore = create<SyncStore>((set) => ({
   fetchDevicesV2: done,
   removeDeviceV2: done,
   disableV2: done,
+  fetchMergeNotices: done,
+  dismissMergeNotices: done,
+  setMergeNoticesOpen: (open) => set({ mergeNoticesOpen: open }),
+  announceResolved: done,
+  setIdentityDialogOpen: (open) => set({ identityDialogOpen: open }),
+  adoptAccountVault: async () => null,
+  retryFreshCopy: async () => null,
 }));

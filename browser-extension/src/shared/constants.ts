@@ -2,7 +2,6 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 export const STORAGE_KEY_CONFIG = "claspt_config";
-export const STORAGE_KEY_UNSAVED = "claspt_unsaved_credentials";
 export const STORAGE_KEY_RECENT = "claspt_recent_credentials";
 export const STORAGE_KEY_POPUP_STATE = "claspt_popup_state";
 export const STORAGE_KEY_ONBOARDING = "claspt_onboarding_complete";

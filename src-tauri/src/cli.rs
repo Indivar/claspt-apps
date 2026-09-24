@@ -260,9 +260,32 @@ impl<'a> SecretResolver<'a> {
     }
 }
 
+/// Variables that authenticate *this* process to Claspt and must not be
+/// inherited by the program `claspt run` starts.
+///
+/// The child gets the resolved secret values it asked for and nothing that
+/// would let it ask for more. Forwarding `CLASPT_API_TOKEN` handed every
+/// dependency of `npm start` a Secrets-scope token and, with it, the whole
+/// vault over the local API, which is the opposite of what running a program
+/// with one injected value is for.
+const CLI_CREDENTIAL_VARS: &[&str] = &[
+    "CLASPT_API_TOKEN",
+    "CLASPT_API_PORT",
+    "CLASPT_SERVE_PASSPHRASE",
+    "CLASPT_PASSWORD",
+];
+
+/// The parent environment minus [`CLI_CREDENTIAL_VARS`].
+fn child_environment(parent: Vec<(String, String)>) -> Vec<(String, String)> {
+    parent
+        .into_iter()
+        .filter(|(name, _)| !CLI_CREDENTIAL_VARS.contains(&name.as_str()))
+        .collect()
+}
+
 /// `claspt run`: build the child's environment, spawn, wait, return its exit
-/// code. The parent's environment is the base; entries from files and --env
-/// are applied on top in the order given.
+/// code. The parent's environment, less the CLI's own credentials, is the
+/// base; entries from files and --env are applied on top in the order given.
 fn run_with_secrets(
     config: &ApiConfig,
     env: Vec<String>,
@@ -270,7 +293,7 @@ fn run_with_secrets(
     command: Vec<std::ffi::OsString>,
 ) -> Result<i32, String> {
     use crate::secret_ref;
-    let mut entries: Vec<(String, String)> = std::env::vars().collect();
+    let mut entries: Vec<(String, String)> = child_environment(std::env::vars().collect());
     for file in &env_files {
         let text = std::fs::read_to_string(file)
             .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
@@ -389,15 +412,17 @@ fn run_serve(action: ServeAction) -> Result<(), String> {
 }
 
 /// The vault the CLI talks about: `CLASPT_VAULT_DIR`, else `~/Claspt`.
+/// The vault a command works on: `CLASPT_VAULT_DIR`, else the vault the app
+/// opened last, else the default directory (see `last_opened::cli_vault_dir`).
 fn vault_dir_for_cli() -> Result<std::path::PathBuf, String> {
-    std::env::var("CLASPT_VAULT_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|_| {
-            dirs::home_dir()
-                .map(|h| h.join("Claspt"))
-                .ok_or("No home dir".to_string())
-        })
-        .map_err(|e| format!("Cannot find vault: {e}"))
+    let home = dirs::home_dir().ok_or("Cannot find vault: no home dir")?;
+    let env_override = std::env::var("CLASPT_VAULT_DIR").ok();
+    let app_config_dir = crate::vault::last_opened::app_config_dir();
+    Ok(crate::vault::last_opened::cli_vault_dir(
+        env_override.as_deref(),
+        app_config_dir.as_deref(),
+        &home,
+    ))
 }
 
 /// Subcommands under `claspt serve`.
@@ -461,19 +486,42 @@ pub enum SshAction {
 /// Subcommands under `claspt mcp`.
 #[derive(Subcommand)]
 pub enum McpAction {
-    /// Write this app's MCP server into a client's config file
+    /// Write this app's MCP server into one or more clients' config files
+    ///
+    /// By default every tool on this machine shares one token: it is issued
+    /// once, written into each named client, and refreshed in every other
+    /// config that carried the previous shared token or a token the vault no
+    /// longer knows. --separate gives the named clients a token of their own.
     Install {
-        /// One of: claude-code, claude-desktop, cursor, windsurf, gemini-cli, codex
-        client: String,
+        /// One or more of: claude-code, claude-desktop, cursor, windsurf, gemini-cli, codex
+        #[arg(required = true, num_args = 1..)]
+        clients: Vec<String>,
         /// Use the Secrets token (can decrypt, with approval) instead of the Notes token
         #[arg(long)]
         secrets: bool,
-        /// Write the project-scoped config in the current directory (claude-code, cursor)
+        /// Write the project-scoped config in the current directory (claude-code, cursor);
+        /// a project token is always its own, limited to that project's memory
         #[arg(long)]
         project: bool,
+        /// A token of its own for each named client, instead of the shared one
+        #[arg(long)]
+        separate: bool,
         /// Print the config instead of writing it; the token is masked
         #[arg(long)]
         print: bool,
+        /// The vault to register the token in (default: the vault the app has open)
+        #[arg(long)]
+        vault: Option<std::path::PathBuf>,
+        /// The Claspt binary to write into the configs (default: this one); for a
+        /// build that is not the installed app
+        #[arg(long)]
+        command: Option<std::path::PathBuf>,
+    },
+    /// Check every AI tool's config on this machine against the open vault
+    Doctor {
+        /// The vault to check against (default: the vault the app has open)
+        #[arg(long)]
+        vault: Option<std::path::PathBuf>,
     },
     /// List supported clients and where each one's config lives
     Clients,
@@ -511,6 +559,11 @@ pub enum NamespaceAction {
         /// Namespace to pin (default: the currently resolved one)
         name: Option<String>,
     },
+    /// Accept the `.claspt` marker found from the current directory upward, so
+    /// that it decides the namespace on this machine. A marker that arrived
+    /// with a clone is ignored until it is accepted, because it could point an
+    /// agent session at another project's memory.
+    Trust,
 }
 
 /// Subcommands under `claspt memory` for the agent memory store.
@@ -636,15 +689,10 @@ fn api_delete(config: &ApiConfig, path: &str) -> Result<serde_json::Value, Strin
         .header("Authorization", format!("Bearer {}", config.token))
         .send()
         .map_err(|e| format!("Request failed: {e}"))?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::NO_CONTENT {
+    if resp.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(serde_json::json!({ "deleted": true }));
     }
-    let body: serde_json::Value = resp.json().map_err(|e| format!("Parse failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("API error {status}: {body}"));
-    }
-    Ok(body)
+    crate::api_response::read_response(resp)
 }
 
 fn api_get(config: &ApiConfig, path: &str) -> Result<serde_json::Value, String> {
@@ -654,13 +702,7 @@ fn api_get(config: &ApiConfig, path: &str) -> Result<serde_json::Value, String> 
         .header("Authorization", format!("Bearer {}", config.token))
         .send()
         .map_err(|e| format!("Request failed: {e}"))?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().map_err(|e| format!("Parse failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("API error {status}: {body}"));
-    }
-    Ok(body)
+    crate::api_response::read_response(resp)
 }
 
 fn api_post(
@@ -675,13 +717,7 @@ fn api_post(
         .json(body)
         .send()
         .map_err(|e| format!("Request failed: {e}"))?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().map_err(|e| format!("Parse failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("API error {status}: {body}"));
-    }
-    Ok(body)
+    crate::api_response::read_response(resp)
 }
 
 fn api_put(
@@ -696,13 +732,7 @@ fn api_put(
         .json(body)
         .send()
         .map_err(|e| format!("Request failed: {e}"))?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().map_err(|e| format!("Parse failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("API error {status}: {body}"));
-    }
-    Ok(body)
+    crate::api_response::read_response(resp)
 }
 
 /// One request with an optional JSON body and an optional `If-Match`.
@@ -724,12 +754,7 @@ fn api_send(
         request = request.header("If-Match", etag);
     }
     let resp = request.send().map_err(|e| format!("Request failed: {e}"))?;
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().map_err(|e| format!("Parse failed: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("API error {status}: {body}"));
-    }
-    Ok(body)
+    crate::api_response::read_response(resp)
 }
 
 /// Run a CLI command. Returns Ok(true) if a CLI command was handled, Ok(false) if not.
@@ -1381,8 +1406,31 @@ pub fn run_cli() -> Result<bool, String> {
 /// `claspt namespace [show|init]`. Works without the desktop app: it only
 /// reads the environment and the working directory.
 fn run_namespace(action: NamespaceAction) -> Result<(), String> {
-    use crate::agent_namespace::{marker_text, namespace_from_marker_text, resolve, MARKER_FILE};
+    use crate::agent_namespace::{
+        marker_namespace, marker_text, namespace_from_marker_text, resolve, TrustedMarkers,
+        MARKER_FILE,
+    };
     match action {
+        NamespaceAction::Trust => {
+            let cwd = std::env::current_dir().map_err(|e| format!("cannot read cwd: {e}"))?;
+            let (namespace, path) = marker_namespace(&cwd, dirs::home_dir().as_deref())
+                .ok_or_else(|| {
+                    format!(
+                        "no usable {MARKER_FILE} marker from {} upward",
+                        cwd.display()
+                    )
+                })?;
+            let mut trusted = TrustedMarkers::load();
+            trusted.trust(&path, &namespace);
+            trusted
+                .save()
+                .map_err(|e| format!("cannot record the accepted marker: {e}"))?;
+            println!(
+                "Accepted {} on this machine: sessions under it use namespace \"{namespace}\".",
+                path.display()
+            );
+            Ok(())
+        }
         NamespaceAction::Show => {
             let resolved = resolve();
             println!(
@@ -1408,8 +1456,15 @@ fn run_namespace(action: NamespaceAction) -> Result<(), String> {
             let checked = namespace_from_marker_text(&text)?;
             std::fs::write(&path, text)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            // The user wrote it here, so it is accepted here; other machines
+            // accept it with `claspt namespace trust` after cloning.
+            let mut trusted = TrustedMarkers::load();
+            trusted.trust(&path, &checked);
+            trusted
+                .save()
+                .map_err(|e| format!("cannot record the accepted marker: {e}"))?;
             println!(
-                "Pinned namespace \"{checked}\" in {}. Commit this file.",
+                "Pinned namespace \"{checked}\" in {}. Commit this file; on other machines run `claspt namespace trust` after cloning.",
                 path.display()
             );
             Ok(())
@@ -1422,6 +1477,202 @@ fn run_namespace(action: NamespaceAction) -> Result<(), String> {
 fn run_mcp(action: McpAction) -> Result<(), String> {
     use crate::mcp_install::{self, Client, Scope};
     match action {
+        McpAction::Install {
+            clients: names,
+            secrets,
+            project,
+            separate,
+            print,
+            vault,
+            command,
+        } => {
+            let mut requested = Vec::new();
+            for name in &names {
+                let client = Client::parse(name).ok_or_else(|| {
+                    format!(
+                        "Unknown client '{name}'. Supported: {}",
+                        Client::ALL
+                            .iter()
+                            .map(|c| c.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+                if !requested.contains(&client) {
+                    requested.push(client);
+                }
+            }
+            let scope = if project { Scope::Project } else { Scope::User };
+            let command = match command {
+                Some(path) => {
+                    if !path.is_file() {
+                        return Err(format!("--command {} is not a file", path.display()));
+                    }
+                    path
+                }
+                None => std::env::current_exe()
+                    .map_err(|e| format!("cannot locate this binary: {e}"))?,
+            };
+            let home = dirs::home_dir().ok_or("No home dir")?;
+            let config_dir = dirs::config_dir().ok_or("No config dir")?;
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            if print {
+                for client in &requested {
+                    println!(
+                        "{}",
+                        mcp_install::render(*client, &command, mcp_install::TOKEN_PLACEHOLDER)?
+                    );
+                    println!(
+                        "\nReplace {} with a {} token from Claspt > Settings > API. File: {}",
+                        mcp_install::TOKEN_PLACEHOLDER,
+                        if secrets { "Secrets" } else { "Notes" },
+                        mcp_install::config_path(*client, scope, &home, &config_dir, &cwd)?
+                            .display()
+                    );
+                }
+                return Ok(());
+            }
+            let token_scope = if secrets {
+                crate::local_api::auth::TokenScope::Secrets
+            } else {
+                crate::local_api::auth::TokenScope::Notes
+            };
+            let vault_dir = match vault {
+                Some(v) => v,
+                None => vault_dir_for_cli()?,
+            };
+            if !vault_dir.join(".securenotes").join("config.json").is_file() {
+                return Err(format!(
+                    "No vault at {}. Open the vault in Claspt once, or pass --vault <dir>.",
+                    vault_dir.display()
+                ));
+            }
+            let scope_word = if secrets { "Secrets" } else { "Notes" };
+
+            if project || separate {
+                // One client per install: revocable on its own, named in the
+                // access log. A project install is limited to this project's
+                // memory and the shared namespace.
+                let namespaces: Vec<String> = if project {
+                    vec![
+                        crate::agent_namespace::resolve().namespace,
+                        crate::pages::agent_memory::GLOBAL_NAMESPACE.to_string(),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                for client in &requested {
+                    let minted = crate::local_api::clients::create(
+                        &vault_dir,
+                        &crate::local_api::clients::default_name(client.name()),
+                        token_scope,
+                        &namespaces,
+                    )
+                    .map_err(|e| {
+                        format!("Cannot register {} as an API client: {e}", client.name())
+                    })?;
+                    let written = mcp_install::install(
+                        *client,
+                        scope,
+                        &command,
+                        minted.token.as_str(),
+                        &home,
+                        &config_dir,
+                        &cwd,
+                    )?;
+                    println!(
+                        "Added Claspt to {} as client \"{}\" ({scope_word} scope, its own token). Restart {} to pick it up.",
+                        written.display(),
+                        minted.client.name,
+                        client.name()
+                    );
+                }
+                return Ok(());
+            }
+
+            // The shared token: issued once, written everywhere it belongs.
+            let registry = crate::local_api::clients::load(&vault_dir)
+                .map_err(|e| format!("Cannot read the client registry: {e}"))?;
+            let holders = mcp_install::holders(&home, &config_dir);
+            let plan = mcp_install::plan_shared(&registry, &holders, &requested);
+            let minted = crate::local_api::clients::create_with_kind(
+                &vault_dir,
+                &crate::local_api::clients::default_name(mcp_install::SHARED_CLIENT_NAME),
+                token_scope,
+                &[],
+                Some(mcp_install::SHARED_CLIENT_KIND),
+            )
+            .map_err(|e| format!("Cannot register the shared client: {e}"))?;
+            let token = minted.token.as_str();
+
+            let mut written: Vec<String> = Vec::new();
+            for client in &requested {
+                let has_entry = holders
+                    .iter()
+                    .any(|h| h.client == *client && h.location == mcp_install::Location::User);
+                if !has_entry {
+                    let path = mcp_install::install(
+                        *client,
+                        Scope::User,
+                        &command,
+                        token,
+                        &home,
+                        &config_dir,
+                        &cwd,
+                    )?;
+                    written.push(format!("{} ({})", client.name(), path.display()));
+                }
+            }
+            for index in &plan.refresh {
+                let holder = &holders[*index];
+                mcp_install::refresh(holder, &command, token)?;
+                written.push(holder.describe());
+            }
+            // Only once every file carries the new token is the old one retired.
+            let mut retired = 0;
+            for id in &plan.revoke {
+                if crate::local_api::clients::revoke(&vault_dir, id)
+                    .map_err(|e| format!("Cannot retire the previous shared token: {e}"))?
+                {
+                    retired += 1;
+                }
+            }
+
+            println!(
+                "One shared {scope_word} token, client \"{}\" ({}), registered in {}.",
+                minted.client.name,
+                minted.client.hint,
+                vault_dir.display()
+            );
+            println!("Written to:");
+            for line in &written {
+                println!("  {line}");
+            }
+            for index in &plan.keep {
+                println!(
+                    "  kept as is: {} (a token of its own)",
+                    holders[*index].describe()
+                );
+            }
+            if retired > 0 {
+                println!("Retired {retired} previous shared token(s).");
+            }
+            println!(
+                "Restart each tool to pick the token up. A Claude Code session that was open \
+                 during this install may write its old copy of ~/.claude.json back on exit; \
+                 run `claspt mcp doctor` afterwards to check."
+            );
+            Ok(())
+        }
+        McpAction::Doctor { vault } => {
+            let vault_dir = match vault {
+                Some(v) => v,
+                None => vault_dir_for_cli()?,
+            };
+            let home = dirs::home_dir().ok_or("No home dir")?;
+            let config_dir = dirs::config_dir().ok_or("No config dir")?;
+            run_mcp_doctor(&vault_dir, &home, &config_dir)
+        }
         McpAction::Clients => {
             let home = dirs::home_dir().ok_or("No home dir")?;
             let config_dir = dirs::config_dir().ok_or("No config dir")?;
@@ -1441,79 +1692,161 @@ fn run_mcp(action: McpAction) -> Result<(), String> {
             }
             Ok(())
         }
-        McpAction::Install {
-            client,
-            secrets,
-            project,
-            print,
-        } => {
-            let client = Client::parse(&client).ok_or_else(|| {
-                format!(
-                    "Unknown client '{client}'. Supported: {}",
-                    Client::ALL
-                        .iter()
-                        .map(|c| c.name())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
-            let scope = if project { Scope::Project } else { Scope::User };
-            let command =
-                std::env::current_exe().map_err(|e| format!("cannot locate this binary: {e}"))?;
-            let home = dirs::home_dir().ok_or("No home dir")?;
-            let config_dir = dirs::config_dir().ok_or("No config dir")?;
-            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-            if print {
-                println!(
-                    "{}",
-                    mcp_install::render(client, &command, mcp_install::TOKEN_PLACEHOLDER)?
-                );
-                println!(
-                    "\nReplace {} with a {} token from Claspt > Settings > API. File: {}",
-                    mcp_install::TOKEN_PLACEHOLDER,
-                    if secrets { "Secrets" } else { "Notes" },
-                    mcp_install::config_path(client, scope, &home, &config_dir, &cwd)?.display()
-                );
-                return Ok(());
-            }
-            let token_scope = if secrets {
-                crate::local_api::auth::TokenScope::Secrets
-            } else {
-                crate::local_api::auth::TokenScope::Notes
-            };
-            let vault_dir = vault_dir_for_cli()?;
-            // One client per install, so this integration is revocable on its
-            // own and shows up by name in the access log.
-            // A project-scoped install is limited to this project's memory and the
-            // shared namespace; a user-scoped one serves every project.
-            let namespaces: Vec<String> = if project {
-                vec![
-                    crate::agent_namespace::resolve().namespace,
-                    crate::pages::agent_memory::GLOBAL_NAMESPACE.to_string(),
-                ]
-            } else {
-                Vec::new()
-            };
-            let minted = crate::local_api::clients::create(
-                &vault_dir,
-                &crate::local_api::clients::default_name(client.name()),
-                token_scope,
-                &namespaces,
-            )
-            .map_err(|e| format!("Cannot register {} as an API client: {e}", client.name()))?;
-            let token = minted.token.as_str();
-            let written =
-                mcp_install::install(client, scope, &command, token, &home, &config_dir, &cwd)?;
-            println!(
-                "Added Claspt to {} as client \"{}\" ({} scope). Restart {} to pick it up.",
-                written.display(),
-                minted.client.name,
-                if secrets { "Secrets" } else { "Notes" },
-                client.name()
-            );
-            Ok(())
-        }
     }
+}
+
+/// `claspt mcp doctor`: every config file's token against the open vault's
+/// registry, and against the running app when it answers. Prints hints, never
+/// tokens.
+fn run_mcp_doctor(
+    vault_dir: &std::path::Path,
+    home: &std::path::Path,
+    config_dir: &std::path::Path,
+) -> Result<(), String> {
+    use crate::local_api::clients::{self, token_hint};
+    use crate::mcp_install::{self, Standing};
+
+    if !vault_dir.join(".securenotes").join("config.json").is_file() {
+        return Err(format!(
+            "No vault at {}. Open the vault in Claspt once, or pass --vault <dir>.",
+            vault_dir.display()
+        ));
+    }
+    let registry =
+        clients::load(vault_dir).map_err(|e| format!("Cannot read the client registry: {e}"))?;
+    let config = crate::vault::init::read_config(vault_dir)
+        .map_err(|e| format!("Cannot read vault config: {e}"))?;
+    let port = config.local_api_port;
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    println!("Vault: {}", vault_dir.display());
+    println!(
+        "Local API: port {port}, {}",
+        if config.local_api_enabled == Some(true) {
+            "enabled"
+        } else {
+            "not enabled"
+        }
+    );
+    println!();
+    println!("Tokens the vault knows:");
+    if registry.clients.is_empty() {
+        println!("  none");
+    }
+    for c in &registry.clients {
+        let kind = match c.kind.as_deref() {
+            Some(mcp_install::SHARED_CLIENT_KIND) => "shared",
+            Some(other) => other,
+            None => "own",
+        };
+        println!(
+            "  {:<12}  {:<8}  {:<7}  {}",
+            c.hint,
+            format!("{:?}", c.scope).to_lowercase(),
+            kind,
+            c.name
+        );
+    }
+    println!();
+
+    let holders = mcp_install::holders(home, config_dir);
+    println!("Config files on this machine:");
+    if holders.is_empty() {
+        println!("  none hold a claspt entry");
+    }
+    let mut stale = 0;
+    let mut answered = false;
+    for holder in &holders {
+        let standing = match mcp_install::standing(&registry, &holder.token) {
+            Standing::Shared => "shared token".to_string(),
+            Standing::Separate {
+                name,
+                project_bound,
+            } => {
+                if project_bound {
+                    format!("project token ({name})")
+                } else {
+                    format!("own token ({name})")
+                }
+            }
+            Standing::Unknown => {
+                stale += 1;
+                "NOT KNOWN to this vault".to_string()
+            }
+        };
+        let live = match probe_token(&base_url, &holder.token) {
+            Some(true) => {
+                answered = true;
+                "app accepts it"
+            }
+            Some(false) => {
+                answered = true;
+                "app refuses it"
+            }
+            None => "app not answering",
+        };
+        println!(
+            "  {:<12}  {:<26}  {:<18}  {}",
+            token_hint(&holder.token),
+            standing,
+            live,
+            holder.describe()
+        );
+    }
+    println!();
+    // A registered token no config here carries is either used elsewhere
+    // (another machine, a script) or left over from a re-issue. Say so, and
+    // let the owner decide in Settings; the extension keeps its token in the
+    // browser, not in a file.
+    let held: Vec<String> = holders
+        .iter()
+        .filter_map(|h| registry.find(&h.token).map(|c| c.id.clone()))
+        .collect();
+    let unheld: Vec<&clients::ClientToken> = registry
+        .clients
+        .iter()
+        .filter(|c| c.kind.as_deref() != Some("extension"))
+        .filter(|c| !held.contains(&c.id))
+        .collect();
+    if !unheld.is_empty() {
+        println!(
+            "Tokens no config file here carries (in use elsewhere, or left over; revoke in Settings if not):"
+        );
+        for c in unheld {
+            println!("  {:<12}  {}", c.hint, c.name);
+        }
+        println!();
+    }
+    if !answered {
+        println!(
+            "Claspt did not answer on port {port}: open the app and unlock the vault, then run this again."
+        );
+    }
+    if stale > 0 {
+        println!(
+            "{stale} config file(s) hold a token this vault does not know. Fix them in one go:\n  \
+             claspt mcp install claude-code claude-desktop --secrets\n\
+             (name every tool you use; each one then shares the same token)."
+        );
+    } else if !holders.is_empty() {
+        println!("Every config file holds a token this vault knows.");
+    }
+    Ok(())
+}
+
+/// Ask the running app whether it accepts a token: `Some(true)`, `Some(false)`
+/// for a refusal, `None` when nothing answered.
+fn probe_token(base_url: &str, token: &str) -> Option<bool> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()?;
+    let resp = client
+        .get(format!("{base_url}/api/status"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .ok()?;
+    Some(resp.status() != reqwest::StatusCode::UNAUTHORIZED)
 }
 
 /// `claspt tokens list|create|revoke|reset-cli`. Works on the registry file
@@ -1589,5 +1922,25 @@ fn run_tokens(action: TokensAction) -> Result<(), String> {
             println!("Forgot this CLI's token. Revoke the old \"CLI on …\" client in Settings; the next command registers a new one.");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_child_never_inherits_the_cli_credentials() {
+        let parent = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("CLASPT_API_TOKEN".to_string(), "clss_secret".to_string()),
+            ("CLASPT_API_PORT".to_string(), "9315".to_string()),
+            ("CLASPT_SERVE_PASSPHRASE".to_string(), "pass".to_string()),
+            ("CLASPT_PASSWORD".to_string(), "pass".to_string()),
+            ("CLASPT_VAULT_DIR".to_string(), "/v".to_string()),
+        ];
+        let child = child_environment(parent);
+        let names: Vec<&str> = child.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["PATH", "CLASPT_VAULT_DIR"]);
     }
 }

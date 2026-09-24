@@ -22,7 +22,7 @@ async function quickGenerate(key: string): Promise<string> {
   }
   if (k === "passphrase") {
     const r = await cmd.generatePassphrase({
-      word_count: 5,
+      word_count: 6,
       separator: "-",
       capitalize: true,
     });

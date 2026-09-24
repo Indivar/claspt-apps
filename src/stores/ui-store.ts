@@ -191,6 +191,25 @@ function persistTheme(theme: ThemeName) {
   localStorage.setItem("claspt-theme", theme);
 }
 
+/**
+ * How the editor opens, remembered between launches.
+ *
+ * It used to be in-memory only and reset to raw markdown on every launch, so
+ * anyone who preferred the formatted view had to switch back each time and a
+ * first-time user met a pane of `##` and `:::secret` with no sign that the
+ * readable version was one click away. Split is the new default: both halves
+ * are visible, so the markup and what it produces explain each other.
+ */
+function loadPersistedEditorMode(): "edit" | "preview" | "split" {
+  const stored = localStorage.getItem("claspt-editor-mode");
+  if (stored === "edit" || stored === "preview" || stored === "split") return stored;
+  return "split";
+}
+
+function persistEditorMode(mode: "edit" | "preview" | "split") {
+  localStorage.setItem("claspt-editor-mode", mode);
+}
+
 function loadPersistedSidebarWidth(): number {
   const stored = localStorage.getItem("claspt-sidebar-width");
   if (stored) {
@@ -237,7 +256,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   inspectorOpen: false,
   importModalOpen: false,
   tagFilter: null,
-  editorMode: "edit" as const,
+  editorMode: loadPersistedEditorMode(),
   helpOpen: false,
   aboutOpen: false,
   shareModalOpen: false,
@@ -281,11 +300,22 @@ export const useUIStore = create<UIStore>((set, get) => ({
   setImportModalOpen: (open) => set({ importModalOpen: open }),
   toggleImportModal: () => set({ importModalOpen: !get().importModalOpen }),
   setTagFilter: (tag) => set({ tagFilter: tag }),
-  setEditorMode: (mode) => set({ editorMode: mode }),
+  setEditorMode: (mode) => {
+    persistEditorMode(mode);
+    set({ editorMode: mode });
+  },
   cycleSplitView: () =>
-    set({ editorMode: get().editorMode === "split" ? "edit" : "split" }),
+    set(() => {
+      const mode = get().editorMode === "split" ? "edit" : "split";
+      persistEditorMode(mode);
+      return { editorMode: mode };
+    }),
   cyclePreview: () =>
-    set({ editorMode: get().editorMode === "preview" ? "edit" : "preview" }),
+    set(() => {
+      const mode = get().editorMode === "preview" ? "edit" : "preview";
+      persistEditorMode(mode);
+      return { editorMode: mode };
+    }),
   setHelpOpen: (open) => set({ helpOpen: open }),
   toggleHelp: () => set({ helpOpen: !get().helpOpen }),
   setAboutOpen: (open) => set({ aboutOpen: open }),

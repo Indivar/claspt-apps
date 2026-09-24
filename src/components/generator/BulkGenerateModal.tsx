@@ -177,7 +177,7 @@ function defaultOptionsJson(genType: GenType): string {
       });
     case "passphrase":
       return JSON.stringify({
-        word_count: 5,
+        word_count: 6,
         separator: "-",
         capitalize: true,
         include_number: false,

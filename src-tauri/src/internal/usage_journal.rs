@@ -55,26 +55,31 @@ impl UsageEntry {
 }
 
 /// Record a credential usage event.
-pub fn log_usage(vault_dir: &Path, entry: &UsageEntry) -> std::io::Result<()> {
-    InternalStore::append(vault_dir, FILENAME, entry, MAX_ENTRIES)
+pub fn log_usage(vault_dir: &Path, master_key: &[u8], entry: &UsageEntry) -> std::io::Result<()> {
+    InternalStore::append_sealed(vault_dir, FILENAME, entry, MAX_ENTRIES, master_key)
 }
 
 /// Get all usage entries.
-pub fn get_usage_journal(vault_dir: &Path) -> Vec<UsageEntry> {
-    InternalStore::read(vault_dir, FILENAME)
+pub fn get_usage_journal(vault_dir: &Path, master_key: &[u8]) -> Vec<UsageEntry> {
+    InternalStore::read_sealed(vault_dir, FILENAME, master_key)
 }
 
 /// Get usage entries for a specific credential.
-pub fn get_credential_usage(vault_dir: &Path, page_path: &str, label: &str) -> Vec<UsageEntry> {
-    get_usage_journal(vault_dir)
+pub fn get_credential_usage(
+    vault_dir: &Path,
+    master_key: &[u8],
+    page_path: &str,
+    label: &str,
+) -> Vec<UsageEntry> {
+    get_usage_journal(vault_dir, master_key)
         .into_iter()
         .filter(|e| e.page_path == page_path && e.label == label)
         .collect()
 }
 
 /// Get recently used credentials (unique, most recent first).
-pub fn get_recently_used(vault_dir: &Path, limit: usize) -> Vec<UsageEntry> {
-    let entries = get_usage_journal(vault_dir);
+pub fn get_recently_used(vault_dir: &Path, master_key: &[u8], limit: usize) -> Vec<UsageEntry> {
+    let entries = get_usage_journal(vault_dir, master_key);
     let mut seen = std::collections::HashSet::new();
     let mut recent = Vec::new();
 
@@ -91,8 +96,12 @@ pub fn get_recently_used(vault_dir: &Path, limit: usize) -> Vec<UsageEntry> {
 }
 
 /// Find stale credentials (not used in N days).
-pub fn find_stale_credentials(vault_dir: &Path, days: i64) -> Vec<(String, String, String)> {
-    let entries = get_usage_journal(vault_dir);
+pub fn find_stale_credentials(
+    vault_dir: &Path,
+    master_key: &[u8],
+    days: i64,
+) -> Vec<(String, String, String)> {
+    let entries = get_usage_journal(vault_dir, master_key);
     let cutoff = Utc::now() - chrono::Duration::days(days);
     let mut last_used: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 

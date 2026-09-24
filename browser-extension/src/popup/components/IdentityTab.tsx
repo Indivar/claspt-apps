@@ -53,6 +53,38 @@ function classifyAsCard(item: IdentityItem): boolean {
 }
 
 /**
+ * Put the identity last used on this site at the top.
+ *
+ * Someone with a home and a work address answers the same question on every
+ * checkout, and the answer is nearly always the one they gave last time here.
+ * Ordering rather than auto-filling: the choice stays theirs, it is just no
+ * longer buried.
+ */
+async function orderForThisSite(items: IdentityItem[]): Promise<IdentityItem[]> {
+  const host = await new Promise<string>((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      try {
+        resolve(new URL(tabs[0]?.url ?? "").hostname);
+      } catch {
+        resolve("");
+      }
+    });
+  });
+  if (!host) return items;
+
+  const preferred = await new Promise<string | null>((resolve) => {
+    chrome.runtime.sendMessage({ type: "IDENTITY_FOR_SITE", host } as Message, (res: Message) => {
+      resolve(res?.type === "IDENTITY_FOR_SITE_RESULT" ? res.pagePath : null);
+    });
+  });
+  if (!preferred) return items;
+
+  const index = items.findIndex((i) => i.pagePath === preferred);
+  if (index <= 0) return items;
+  return [items[index]!, ...items.slice(0, index), ...items.slice(index + 1)];
+}
+
+/**
  * Identity & Credit Card tab.
  *
  * SECURITY: All data lives exclusively in the Claspt vault (identities/ folder).
@@ -93,7 +125,11 @@ interface IdentityTabProps {
 
 export function IdentityTab({ connected = true }: IdentityTabProps) {
   const [items, setItems] = useState<IdentityItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  // "Loading" only means something while connected; disconnected, there is
+  // nothing to wait for, and deriving it keeps the effect below free of a
+  // synchronous state write.
+  const [loadingState, setLoading] = useState(true);
+  const loading = connected && loadingState;
   const [section, setSection] = useState<Section>("list");
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -110,15 +146,12 @@ export function IdentityTab({ connected = true }: IdentityTabProps) {
 
   // Load identities from vault via search API
   const loadFromVault = useCallback(() => {
-    if (!connected) {
-      setLoading(false);
-      return;
-    }
+    if (!connected) return;
     chrome.runtime.sendMessage(
       { type: "LIST_IDENTITIES" } as Message,
       (res: Message) => {
         if (res?.type === "LIST_IDENTITIES_RESULT") {
-          setItems(res.items);
+          void orderForThisSite(res.items).then(setItems);
         }
         setLoading(false);
       }
@@ -239,14 +272,20 @@ export function IdentityTab({ connected = true }: IdentityTabProps) {
 
   // ── Fill form ──
 
-  const fillForm = useCallback((fields: Record<string, string>) => {
+  const fillForm = useCallback((fields: Record<string, string>, pagePath?: string) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs[0];
       if (!tab?.id) return;
+      // `pagePath` lets the content script record which identity was used on
+      // this site, so the next visit offers it first.
       chrome.tabs.sendMessage(tab.id, {
         type: "FILL_IDENTITY",
         identity: fields,
+        pagePath,
       });
+      // Filling is the whole reason the popup is open; leaving it up hides the
+      // form the user is about to check.
+      window.close();
     });
   }, []);
 
@@ -471,7 +510,7 @@ export function IdentityTab({ connected = true }: IdentityTabProps) {
                     </div>
                   ) : null)}
                   <div className="flex gap-1.5 pt-1.5">
-                    <button onClick={() => fillForm(item.fields)} className="flex-1 rounded bg-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-accent-hover">Fill Form</button>
+                    <button onClick={() => fillForm(item.fields, item.pagePath)} className="flex-1 rounded bg-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-accent-hover">Fill Form</button>
                     <button
                       onClick={() => {
                         setEditingPagePath(item.pagePath);
@@ -582,7 +621,7 @@ export function IdentityTab({ connected = true }: IdentityTabProps) {
               {isExpanded && (
                 <div className="space-y-1.5 px-1">
                   <div className="flex gap-1.5">
-                    <button onClick={() => fillForm(item.fields)} className="flex-1 rounded-lg bg-accent px-2 py-1.5 text-[10px] font-medium text-white hover:bg-accent-hover transition-colors">Fill Checkout Form</button>
+                    <button onClick={() => fillForm(item.fields, item.pagePath)} className="flex-1 rounded-lg bg-accent px-2 py-1.5 text-[10px] font-medium text-white hover:bg-accent-hover transition-colors">Fill Checkout Form</button>
                     <button
                       onClick={() => {
                         const pw = item.fields.card_number || num;

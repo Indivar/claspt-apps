@@ -208,6 +208,9 @@ impl From<crate::pages::secret::PatchError> for ApiError {
             PatchError::BlockNotFound => Self::new(ApiErrorCode::BlockNotFound, e.to_string()),
             PatchError::LabelConflict => Self::new(ApiErrorCode::LabelConflict, e.to_string()),
             PatchError::InvalidInput => Self::new(ApiErrorCode::BadRequest, e.to_string()),
+            // The vault holds this block's value under a key it does not have;
+            // the request is well formed and still cannot be honoured.
+            PatchError::Sealed => Self::new(ApiErrorCode::BadRequest, e.to_string()),
         }
     }
 }

@@ -51,7 +51,11 @@ pub(crate) fn unstage_device_local(index: &mut git2::Index) {
         .iter()
         .filter_map(|entry| {
             let path = std::str::from_utf8(&entry.path).ok()?;
-            path.starts_with(".securenotes/")
+            // `.inbox/` too: a drop that could not be taken in is quarantined
+            // there and may be a plaintext credential file. gitignore keeps
+            // new vaults clean; this keeps a vault whose ignore file predates
+            // the rule from committing it.
+            (path.starts_with(".securenotes/") || path.starts_with(".inbox/"))
                 .then(|| PathBuf::from(path))
         })
         .collect();
@@ -70,7 +74,7 @@ pub fn commit_changes(vault_dir: &Path, title: &str) -> Result<Option<String>, G
 
     // Stage all changes
     let mut index = repo.index()?;
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+    claspt_core::git::ops::stage_all(&repo, &mut index)?;
     // Also stage deletions
     index.update_all(["*"].iter(), None)?;
     unstage_device_local(&mut index);
@@ -318,7 +322,7 @@ pub fn restore_file_to_commit(
 
     let repo = git2::Repository::open(vault_dir)?;
     let mut index = repo.index()?;
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+    claspt_core::git::ops::stage_all(&repo, &mut index)?;
     index.update_all(["*"].iter(), None)?;
     unstage_device_local(&mut index);
     index.write()?;
@@ -526,5 +530,34 @@ mod tests {
         assert!(log[0].message.starts_with("Restore:"));
         // Total commits: initial + v1 + v2 + restore = 4
         assert_eq!(log.len(), 4);
+    }
+
+    #[test]
+    fn unstage_drops_the_inbox_and_keeps_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let repo = git2::Repository::init(vault).unwrap();
+        std::fs::create_dir_all(vault.join(".inbox").join("failed")).unwrap();
+        std::fs::write(
+            vault.join(".inbox").join("failed").join("passwords.txt"),
+            "x",
+        )
+        .unwrap();
+        std::fs::create_dir_all(vault.join("general")).unwrap();
+        std::fs::write(vault.join("general").join("a.md"), "# a").unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        unstage_device_local(&mut index);
+        let staged: Vec<String> = index
+            .iter()
+            .map(|e| String::from_utf8_lossy(&e.path).into_owned())
+            .collect();
+        assert!(staged.iter().any(|p| p == "general/a.md"));
+        assert!(
+            !staged.iter().any(|p| p.starts_with(".inbox/")),
+            "{staged:?}"
+        );
     }
 }

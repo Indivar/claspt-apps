@@ -282,6 +282,69 @@ pub fn local_api_status(api_state: State<LocalApiState>) -> Result<serde_json::V
 ///
 /// Used by the frontend to help users configure an MCP server that shells out to
 /// this executable. Errors if the path cannot be detected or is not valid UTF-8.
+/// Prepare an AI tool's connection in one call: mint it a client of its own,
+/// switch the local API on, and return the config to paste.
+///
+/// One call rather than three because the walkthrough has to leave the user
+/// with something that works. Its snippet used to carry no token at all, so
+/// the tool started and every request was refused; sending people to Settings
+/// to finish is the thing the walkthrough exists to avoid.
+///
+/// The token is a named, revocable client rather than the vault-wide token, so
+/// it can be withdrawn from one tool without affecting anything else. `scope`
+/// is "notes" (secret values redacted, secret writes refused) or "secrets".
+#[tauri::command]
+pub async fn connect_ai_tool(
+    app: AppHandle,
+    scope: String,
+    vault_state: State<'_, VaultState>,
+    api_state: State<'_, LocalApiState>,
+) -> Result<serde_json::Value, String> {
+    let vault_dir = vault_state.vault_dir().ok_or("Vault not open")?;
+    let token_scope = match scope.as_str() {
+        "notes" => TokenScope::Notes,
+        "secrets" => TokenScope::Secrets,
+        other => {
+            return Err(format!(
+                "unknown scope '{other}' — expected notes or secrets"
+            ))
+        }
+    };
+
+    let minted = clients::create(&vault_dir, "AI tool", token_scope, &[])
+        .map_err(|e| format!("Could not create API client: {e}"))?;
+
+    // Remember that the API is on, so it comes back up on the next unlock
+    // rather than only for this session.
+    let mut config =
+        init::read_config(&vault_dir).map_err(|e| format!("Config read failed: {e}"))?;
+    if config.local_api_enabled != Some(true) {
+        config.local_api_enabled = Some(true);
+        init::write_config(&vault_dir, &config)
+            .map_err(|e| format!("Could not save config: {e}"))?;
+    }
+    let port = config.local_api_port;
+
+    if !api_state.is_running() {
+        let handle = app.clone();
+        tokio::spawn(async move {
+            if let Err(e) = server::start_server(port, handle).await {
+                log::error!("Local API server failed: {e}");
+            }
+        });
+    }
+
+    let exe =
+        std::env::current_exe().map_err(|e| format!("Failed to detect executable path: {e}"))?;
+    let snippet = crate::mcp_install::snippet(&exe, minted.token.as_str())?;
+
+    Ok(serde_json::json!({
+        "snippet": snippet,
+        "port": port,
+        "scope": scope,
+    }))
+}
+
 #[tauri::command]
 pub fn get_exe_path() -> Result<String, String> {
     std::env::current_exe()

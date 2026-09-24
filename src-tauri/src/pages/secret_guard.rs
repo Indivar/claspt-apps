@@ -40,7 +40,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::secret::{is_code_fence, parse_secret_open};
+use super::secret::{parse_secret_open, FenceTracker};
 
 /// One thing the guard found. Carries where and what kind, never the value.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -153,7 +153,7 @@ fn compiled() -> &'static (Vec<(&'static str, Regex)>, Regex) {
 pub fn find_plaintext_secrets(content: &str) -> Vec<PlaintextFinding> {
     let (shapes, assignment) = compiled();
     let mut findings = Vec::new();
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
     let mut in_secret_block = false;
 
     for (index, line) in content.lines().enumerate() {
@@ -163,11 +163,10 @@ pub fn find_plaintext_secrets(content: &str) -> Vec<PlaintextFinding> {
             }
             continue;
         }
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             continue;
         }
-        if !in_code_fence && parse_secret_open(line).is_some() {
+        if !fence.is_open() && parse_secret_open(line).is_some() {
             in_secret_block = true;
             continue;
         }
@@ -271,7 +270,7 @@ mod tests {
 # Deploy notes
 AWS key: AKIAIOSFODNN7EXAMPLE
 github: ghp_0123456789abcdefghijklmnopqrstuvwxyzABCDEF
-stripe sk_live_4eC39HqLyjWDarjtT1zdp7dc
+stripe sk_test_4eC39HqLyjWDarjtT1zdp7dc
 -----BEGIN RSA PRIVATE KEY-----
 token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U
 mine {claspt_token}"
@@ -335,7 +334,7 @@ access_key: AKIAIOSFODNN7EXAMPLE
 
     #[test]
     fn env_samples_inside_code_fences_are_scanned() {
-        let content = "```env\nSTRIPE_KEY=sk_live_4eC39HqLyjWDarjtT1zdp7dc\n```";
+        let content = "```env\nSTRIPE_KEY=sk_test_4eC39HqLyjWDarjtT1zdp7dc\n```";
         assert_eq!(kinds(content), vec![("stripe-key", 2)]);
     }
 
@@ -366,7 +365,7 @@ access_key: AKIAIOSFODNN7EXAMPLE
     fn one_finding_per_line_and_lines_after_an_unterminated_block_are_skipped() {
         // Two shapes on one line: the first shape in table order wins.
         assert_eq!(
-            kinds("AKIAIOSFODNN7EXAMPLE and sk_live_4eC39HqLyjWDarjtT1zdp7dc"),
+            kinds("AKIAIOSFODNN7EXAMPLE and sk_test_4eC39HqLyjWDarjtT1zdp7dc"),
             vec![("aws-access-key", 1)]
         );
         // An unterminated block swallows the rest of the page, which mirrors

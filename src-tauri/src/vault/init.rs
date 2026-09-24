@@ -41,16 +41,15 @@ impl std::fmt::Debug for VaultCreationResult {
     }
 }
 
-/// Atomically write data to a file with 0o600 permissions (owner-only read/write).
+/// Atomically write data to a file that is owner-only from its creation.
+///
+/// Delegates to [`claspt_core::fs_perms::write_owner_only`]: the file is
+/// created with the restricted mode rather than restricted after the bytes
+/// are in it, flushed, then renamed into place. This used to create the
+/// temporary with `std::fs::write` and chmod it afterwards, which left every
+/// token file and key file world-readable for the instant between the two.
 pub fn write_restricted(path: &Path, data: &[u8]) -> Result<(), VaultError> {
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, data)?;
-    claspt_core::fs_perms::restrict_to_owner(&tmp_path)?;
-
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
+    claspt_core::fs_perms::write_owner_only(path, data)?;
     Ok(())
 }
 
@@ -88,6 +87,9 @@ const MANAGED_GITIGNORE_RULES: &str = r#"# Vault internals — device-local, nev
 # The whole directory is excluded on purpose: naming individual files has twice
 # let a new one through.
 .securenotes/
+# The drop folder holds files on their way in, and what could not be taken in.
+# A rejected drop can be a plaintext credential file; it is never history.
+.inbox/
 *.tmp"#;
 
 /// The default `.gitignore` written into a brand-new vault.
@@ -157,6 +159,67 @@ pub fn reconcile_gitignore(vault_dir: &Path) -> Result<(), VaultError> {
 ///
 /// Returns the master key (for the caller to store in VaultState)
 /// and a recovery key string (for one-time display to the user).
+/// Whether `dir` contains anything at all.
+///
+/// An unreadable directory counts as occupied: if we cannot see what is there,
+/// the safe answer is to leave it alone.
+fn directory_has_entries(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(_) => true,
+    }
+}
+
+/// What is already at a location the user has chosen for a new vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultDirState {
+    /// Nothing there, or an empty folder. Safe to create.
+    Empty,
+    /// A complete vault. It should be unlocked, not created over.
+    Vault,
+    /// A `.securenotes/` directory with no usable `vault.key`: a vault whose
+    /// key was moved or whose creation was interrupted. Creating here is
+    /// refused, because the remains may still be the only route back to the
+    /// data.
+    Damaged,
+    /// Files that are not a vault. Creating here adds the vault's folders
+    /// alongside them and deletes nothing, but the user should know first.
+    NotEmpty,
+}
+
+/// Inspect a location without touching it.
+pub fn inspect_vault_dir(vault_dir: &Path) -> VaultDirState {
+    let securenotes = vault_dir.join(".securenotes");
+    if securenotes.join("vault.key").exists() {
+        return VaultDirState::Vault;
+    }
+    if securenotes.exists() && directory_has_entries(&securenotes) {
+        return VaultDirState::Damaged;
+    }
+    if !vault_dir.exists() {
+        return VaultDirState::Empty;
+    }
+    // `.DS_Store` and `.localized` are written by the Finder simply for having
+    // looked at a folder. Counting them as content would warn about folders
+    // the user correctly believes are empty, which teaches people to click
+    // past the warning that matters.
+    let noise = [".DS_Store", ".localized"];
+    let occupied = std::fs::read_dir(vault_dir)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                let name = e.file_name();
+                !noise.contains(&name.to_string_lossy().as_ref())
+            })
+        })
+        .unwrap_or(true);
+    if occupied {
+        VaultDirState::NotEmpty
+    } else {
+        VaultDirState::Empty
+    }
+}
+
 pub fn initialize_vault(
     vault_dir: &Path,
     password: &[u8],
@@ -175,12 +238,24 @@ pub fn initialize_vault_with_id(
 ) -> Result<(Zeroizing<Vec<u8>>, VaultCreationResult), VaultError> {
     let securenotes = vault_dir.join(".securenotes");
 
-    if securenotes.join("vault.key").exists() {
+    // Never write over what is already here.
+    //
+    // This used to test only for `vault.key`, which let a damaged vault — one
+    // whose key had been moved, or whose creation was interrupted — be treated
+    // as an empty folder. Creation then overwrote `config.json`, taking the
+    // vault_id, the API tokens and `master_key_verify` with it and turning a
+    // recoverable vault into an unrecoverable one. Anything inside
+    // `.securenotes/` means a vault lives here, whole or not.
+    if securenotes.exists() && directory_has_entries(&securenotes) {
         return Err(VaultError::AlreadyExists(vault_dir.display().to_string()));
     }
 
-    // Create directory structure
+    // Create directory structure. `.securenotes/` is narrowed to the owner
+    // before anything is written into it: on Unix that denies other users the
+    // traversal they would need to open the files inside at all, and on
+    // Windows files created under it inherit the owner-only ACL.
     std::fs::create_dir_all(&securenotes)?;
+    claspt_core::fs_perms::restrict_to_owner(&securenotes)?;
     std::fs::create_dir_all(securenotes.join("index"))?;
 
     // Create default folders — a starter framework users can customize later
@@ -246,12 +321,25 @@ pub fn initialize_vault_with_id(
     // restored from an older backup also picks up the current rules.
     reconcile_gitignore(vault_dir)?;
 
-    if is_restore {
+    // Version history is a convenience layered on top of the vault, not part
+    // of it: the pages, the key and the config are already written and usable.
+    // A git failure here used to abort the whole call, which reported a
+    // created vault as an error and left the user with no way to tell that it
+    // existed. Warn and carry on instead.
+    let git_result = if is_restore {
         // Only init an empty git repo; the sync pull will populate it with
         // the server's history as its first commit.
-        git2::Repository::init(vault_dir)?;
+        git2::Repository::init(vault_dir)
+            .map(|_| ())
+            .map_err(VaultError::from)
     } else {
-        init_git_repo(vault_dir)?;
+        init_git_repo(vault_dir)
+    };
+    if let Err(e) = git_result {
+        log::warn!(
+            "Vault created at {} but version history could not be set up: {e}",
+            vault_dir.display()
+        );
     }
 
     let result = VaultCreationResult { recovery_key };
@@ -264,7 +352,7 @@ fn init_git_repo(vault_dir: &Path) -> Result<(), VaultError> {
 
     // Stage all files
     let mut index = repo.index()?;
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+    claspt_core::git::ops::stage_all(&repo, &mut index)?;
     crate::git::ops::unstage_device_local(&mut index);
     index.write()?;
     let tree_oid = index.write_tree()?;
@@ -283,6 +371,11 @@ pub fn validate_vault_exists(vault_dir: &Path) -> Result<(), VaultError> {
     if !securenotes.join("vault.key").exists() {
         return Err(VaultError::NotFound(vault_dir.display().to_string()));
     }
+    // Every open re-asserts the owner-only mode on the directory. Vaults made
+    // before this existed were created at the umask's 0755, and a copy or
+    // restore from a backup can widen it again; the cost of setting it each
+    // time is one syscall.
+    claspt_core::fs_perms::restrict_to_owner(&securenotes)?;
     Ok(())
 }
 
@@ -458,7 +551,7 @@ pub fn refresh_help_pages(vault_dir: &Path) {
         if let Ok(entries) = std::fs::read_dir(&help_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(true, |e| e != "md") {
+                if path.extension().is_none_or(|e| e != "md") {
                     continue;
                 }
                 let Some(file_name) = path.file_name() else {
@@ -906,5 +999,122 @@ mod tests {
         backfill_setup_seen_for_existing_vault(vault_dir);
 
         assert_eq!(read_config(vault_dir).unwrap().setup_version_seen, Some(99));
+    }
+
+    #[test]
+    fn a_vault_can_be_created_in_a_folder_that_already_holds_a_repository() {
+        // Picking a folder that happens to contain a checked-out repository
+        // used to fail at the git step with `invalid path: '<dir>/'`, after
+        // the key, the config and the welcome pages had already been written.
+        // The caller saw an error and had no way to tell a usable vault was
+        // sitting there.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+
+        let nested = vault.join("some-checkout");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        std::fs::write(nested.join("README.md"), "not ours").unwrap();
+
+        let (master_key, _) = initialize_vault(&vault, b"a-long-test-password").unwrap();
+        assert_eq!(master_key.len(), 32);
+        assert!(vault.join(".securenotes/vault.key").exists());
+
+        // Version history works, and left the nested repository alone.
+        let repo = git2::Repository::open(&vault).unwrap();
+        let tree = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(
+            tree.get_path(std::path::Path::new("some-checkout"))
+                .is_err(),
+            "the nested repository must not be absorbed into the vault history"
+        );
+    }
+
+    #[test]
+    fn a_damaged_vault_is_never_written_over() {
+        // A .securenotes holding a config but no vault.key: a vault whose key
+        // was moved, or whose creation was interrupted. Creating here used to
+        // succeed and overwrite config.json, taking the vault_id and the
+        // master key verification hash with it — which is what a recovery
+        // would have needed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path();
+        std::fs::create_dir_all(vault.join(".securenotes")).unwrap();
+        std::fs::write(
+            vault.join(".securenotes/config.json"),
+            br#"{"vault_id":"the-only-copy"}"#,
+        )
+        .unwrap();
+
+        let err = initialize_vault(vault, b"a-long-test-password")
+            .expect_err("creating over a damaged vault must be refused");
+        assert!(matches!(err, VaultError::AlreadyExists(_)));
+
+        let config = std::fs::read_to_string(vault.join(".securenotes/config.json")).unwrap();
+        assert!(
+            config.contains("the-only-copy"),
+            "the existing config was overwritten"
+        );
+        assert_eq!(inspect_vault_dir(vault), VaultDirState::Damaged);
+    }
+
+    #[test]
+    fn a_complete_vault_is_never_written_over() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path();
+        initialize_vault(vault, b"a-long-test-password").unwrap();
+        let key_before = std::fs::read(vault.join(".securenotes/vault.key")).unwrap();
+
+        let err = initialize_vault(vault, b"a-different-password")
+            .expect_err("creating over a vault must be refused");
+        assert!(matches!(err, VaultError::AlreadyExists(_)));
+
+        let key_after = std::fs::read(vault.join(".securenotes/vault.key")).unwrap();
+        assert_eq!(key_before, key_after, "the master key was replaced");
+        assert_eq!(inspect_vault_dir(vault), VaultDirState::Vault);
+    }
+
+    #[test]
+    fn a_folder_of_unrelated_files_is_reported_so_the_user_can_be_warned() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("my-taxes.pdf"), b"important").unwrap();
+        assert_eq!(inspect_vault_dir(dir), VaultDirState::NotEmpty);
+
+        // Creating there is allowed — it adds folders beside the files and
+        // removes nothing — but the user is told first.
+        initialize_vault(dir, b"a-long-test-password").unwrap();
+        assert!(dir.join("my-taxes.pdf").exists(), "a user file was removed");
+    }
+
+    #[test]
+    fn an_empty_folder_and_a_missing_one_are_both_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(inspect_vault_dir(tmp.path()), VaultDirState::Empty);
+        assert_eq!(
+            inspect_vault_dir(&tmp.path().join("does-not-exist")),
+            VaultDirState::Empty
+        );
+    }
+
+    #[test]
+    fn a_finder_visit_does_not_make_a_folder_look_occupied() {
+        // Warning about a folder the user correctly believes is empty teaches
+        // them to click past the warning that matters.
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".DS_Store"), b"finder").unwrap();
+        assert_eq!(inspect_vault_dir(tmp.path()), VaultDirState::Empty);
+    }
+
+    #[test]
+    fn the_inbox_is_never_committed() {
+        assert!(MANAGED_GITIGNORE_RULES.contains("\n.inbox/\n"));
     }
 }

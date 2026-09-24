@@ -10,11 +10,13 @@
  * configuration snippets and a collapsible reference of all HTTP endpoints.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorMessage } from "@/lib/error-message";
 import * as cmd from "@/lib/commands";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { SpinnerIcon } from "@/components/ui/icons";
 import type { VaultConfig } from "@claspt/shared/types";
 import { copyToClipboard } from "@/lib/clipboard";
+import { PairExtension } from "@/components/settings/PairExtension";
 
 interface IntegrationsTabProps {
   draft: VaultConfig;
@@ -120,6 +122,28 @@ export function IntegrationsTab({ draft, updateDraft }: IntegrationsTabProps) {
     setToggling(false);
   }, [draft.local_api_enabled, updateDraft]);
 
+  const [mintingMcpKey, setMintingMcpKey] = useState(false);
+  const [mcpKeyError, setMcpKeyError] = useState<string | null>(null);
+
+  /** Mint a key for the MCP snippets and switch the local API on for it. */
+  const createMcpKey = useCallback(async () => {
+    setMintingMcpKey(true);
+    setMcpKeyError(null);
+    try {
+      // The secrets scope, because an MCP client that cannot decrypt cannot do
+      // the thing people connect it for. Narrow it afterwards by creating a
+      // notes-scoped client instead and revoking this one.
+      const result = await cmd.createApiClient("MCP client", "secrets", []);
+      setCreated({ token: result.token, client: result.client });
+      await refreshClients();
+      if (!draft.local_api_enabled) updateDraft("local_api_enabled", true);
+    } catch (e) {
+      setMcpKeyError(errorMessage(e));
+    } finally {
+      setMintingMcpKey(false);
+    }
+  }, [draft.local_api_enabled, refreshClients, updateDraft]);
+
   const port = draft.local_api_port ?? 9315;
   // Snippets show the token created in this session while it is on screen;
   // otherwise a placeholder, because no stored token can be read back.
@@ -180,14 +204,23 @@ export function IntegrationsTab({ draft, updateDraft }: IntegrationsTabProps) {
       </div>
 
       {/* API clients */}
+      <SectionHeader title="Browser Extension" />
+      <PairExtension />
+
       <SectionHeader title="API Clients" />
       <p className="mb-3 text-[12px] leading-relaxed text-text-muted">
-        Every tool that talks to Claspt has its own named token, so each can be revoked on
-        its own. Tokens are stored as hashes and shown once, when created.{" "}
+        The AI tools on this machine share one token by default, so a re-issue reaches all
+        of them at once; a tool can have a token of its own when you want to revoke it
+        alone. Tokens are stored as hashes and shown once, when created.{" "}
         <code className="rounded bg-surface-overlay px-1 text-[11px]">
-          claspt mcp install claude-code
+          claspt mcp install claude-code claude-desktop
         </code>{" "}
-        and extension pairing create theirs automatically.
+        issues the shared token and writes every config;{" "}
+        <code className="rounded bg-surface-overlay px-1 text-[11px]">
+          claspt mcp doctor
+        </code>{" "}
+        shows which config still holds a token this vault does not know. Extension pairing
+        creates its own.
       </p>
 
       {clients.length === 0 ? (
@@ -221,6 +254,7 @@ export function IntegrationsTab({ draft, updateDraft }: IntegrationsTabProps) {
                   <button
                     onClick={() => handleRevoke(c.id)}
                     className="rounded-lg border border-warning/40 px-2.5 py-1 text-[11px] font-medium text-warning transition-all hover:bg-warning/10 active:scale-95"
+                    title={`Every tool still using ${c.hint} stops working`}
                   >
                     Confirm revoke
                   </button>
@@ -371,15 +405,44 @@ export function IntegrationsTab({ draft, updateDraft }: IntegrationsTabProps) {
         Copy-paste config for AI tools that support the Model Context Protocol.
       </p>
 
-      <p className="mb-3 text-[11px] text-text-muted">
+      <p className="mb-3 text-[11px] leading-relaxed text-text-muted">
         The quickest route is{" "}
         <code className="rounded bg-surface-overlay px-1">
-          claspt mcp install claude-code
+          claspt mcp install claude-code claude-desktop
         </code>{" "}
-        (or cursor, codex, windsurf, gemini-cli, claude-desktop), which creates a client
-        and writes the config for you. The snippets below use the token created above, if
-        any.
+        (any of claude-code, claude-desktop, cursor, codex, windsurf, gemini-cli), which
+        issues one shared token for the vault you have open and writes every named config.
       </p>
+
+      {/* A key for these snippets, on demand.
+          Tokens are stored as hashes and shown once, so an existing one cannot
+          be read back and printed here — the snippets said `<token>` and could
+          not be pasted anywhere. Rather than weaken that by storing tokens in
+          the clear, the section mints one when it is needed. */}
+      {!created ? (
+        <div className="mb-3 rounded-lg border border-border/60 bg-surface-raised/50 px-3.5 py-3">
+          <p className="mb-2 text-[12px] leading-relaxed text-text-muted">
+            The snippets below need a key. Existing keys are stored as hashes and cannot
+            be shown again, so create one for this tool — it appears here once.
+          </p>
+          <button
+            type="button"
+            onClick={() => void createMcpKey()}
+            disabled={mintingMcpKey}
+            className="rounded-lg border border-accent/40 bg-accent/[0.07] px-3 py-1.5 text-[12.5px] font-semibold text-accent transition-colors hover:bg-accent/[0.12] disabled:opacity-50"
+          >
+            {mintingMcpKey ? "Creating…" : "Create a key for these snippets"}
+          </button>
+          {mcpKeyError && (
+            <p className="mt-2 text-[12px] leading-relaxed text-danger">{mcpKeyError}</p>
+          )}
+        </div>
+      ) : (
+        <p className="mb-3 text-[11px] leading-relaxed text-success">
+          The snippets below carry a real key. It is shown only while this panel stays
+          open — copy what you need before closing it.
+        </p>
+      )}
       <ConfigBlock
         label="Claude Code (CLI)"
         code={`claude mcp add claspt -e CLASPT_API_TOKEN=${configToken} -- ${exePath} --mcp`}

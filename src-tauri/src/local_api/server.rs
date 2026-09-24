@@ -188,6 +188,9 @@ fn build_router(ctx: ApiContext) -> Router {
         .merge(public_routes)
         .fallback(routes::not_found)
         .layer(Extension(shared))
+        // Outermost on purpose: it runs before auth, before pairing, and
+        // before the fallback, so a browser page never sees any of them.
+        .layer(middleware::from_fn(auth::require_local_origin))
 }
 
 /// Start the local HTTP API server.

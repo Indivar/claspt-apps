@@ -307,7 +307,7 @@ fn find_existing_page_by_title(
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if !path.is_file() || path.extension().map_or(true, |ext| ext != "md") {
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "md") {
             continue;
         }
         if let Ok(page) = crud::read_page(
@@ -416,7 +416,7 @@ pub fn consolidate_one_group(
         // Create new page
         let body = format!(
             "Credentials for **{}**.\n\n{}",
-            &group.domain,
+            group.domain,
             encrypted_content.trim_end()
         );
         let page = crud::create_page(vault_dir, &title, target_folder, &body, false)?;

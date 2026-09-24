@@ -136,6 +136,11 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AuthInfo {
 /// memory read does only under Secrets scope, since Notes scope gets
 /// redacted bodies.
 fn decrypts(action: &str, scope: TokenScope) -> bool {
+    // The mutating secret routes and memory append hand back the page with
+    // every block decrypted, so they read as much as a read does. Left off
+    // this list they escaped the decrypt limiter and showed in the log as
+    // writes, and a client with a standing grant could read any page
+    // without limit by patching and unpatching a field.
     scope == TokenScope::Secrets
         && matches!(
             action,
@@ -145,19 +150,29 @@ fn decrypts(action: &str, scope: TokenScope) -> bool {
                 | "browser.login"
                 | "passkey.register"
                 | "passkey.authenticate"
+                | "secret.write"
+                | "secret.delete"
+                | "secret.rename"
+                | "memory.write"
+                | "memory.append"
         )
 }
 
-/// Constant-time byte comparison (prevents timing attacks).
+/// Whether this request must be approved in the app first.
+///
+/// Approve mode used to prompt for every request from a secrets token,
+/// /api/status and folder listings included. The first prompt Claude Code
+/// produced was for /api/status, the user answered "remember for session",
+/// and every later secret read was silent: the safeguard undid itself. Only
+/// a request that hands out decrypted content is worth a prompt.
+fn approval_needed(action: &str, scope: TokenScope, mode: Option<&str>) -> bool {
+    mode == Some("approve") && decrypts(action, scope)
+}
+
+/// Constant-time byte comparison (prevents timing attacks). One
+/// implementation for the whole workspace lives in the core crate.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    claspt_core::crypto::compare::constant_time_eq(a, b)
 }
 
 /// Generate a scoped API token with the appropriate prefix.
@@ -364,10 +379,7 @@ async fn authenticate_and_run(mut request: Request, next: Next) -> (Response, Op
         }
     }
 
-    if ask
-        && scope == TokenScope::Secrets
-        && config.secret_access_mode.as_deref() == Some("approve")
-    {
+    if ask && approval_needed(action, scope, config.secret_access_mode.as_deref()) {
         let allowed = super::approval::gate(
             ctx.services.as_ref(),
             &vault_dir,
@@ -400,6 +412,10 @@ async fn authenticate_and_run(mut request: Request, next: Next) -> (Response, Op
         client_kind: client.kind,
     };
     request.extensions_mut().insert(auth.clone());
+    // A request from an authorised client counts as activity for the key
+    // lock, so a browser extension or an AI tool at work behind a locked
+    // screen is not cut off mid-task. The screen lock is left alone.
+    vault.touch_api_activity();
     (next.run(request).await, Some(auth))
 }
 
@@ -454,6 +470,13 @@ mod tests {
         assert!(decrypts("secret.read", TokenScope::Secrets));
         assert!(decrypts("page.read", TokenScope::Secrets));
         assert!(decrypts("memory.read", TokenScope::Secrets));
+        // Mutations that return the decrypted page count too.
+        assert!(decrypts("secret.write", TokenScope::Secrets));
+        assert!(decrypts("secret.delete", TokenScope::Secrets));
+        assert!(decrypts("secret.rename", TokenScope::Secrets));
+        assert!(decrypts("memory.append", TokenScope::Secrets));
+        assert!(!decrypts("status", TokenScope::Secrets));
+        assert!(!decrypts("page.list", TokenScope::Secrets));
         assert!(
             !decrypts("page.read", TokenScope::Notes),
             "notes scope gets redacted bodies"
@@ -470,5 +493,186 @@ mod tests {
         assert!(open.may_use_namespace("claspt"));
         assert!(open.may_use_namespace("global"));
         assert!(!open.may_use_namespace("other"));
+    }
+}
+
+/// Refuse requests that did not come from this machine's own clients.
+///
+/// The server binds to 127.0.0.1, which keeps other machines out and nothing
+/// else. A web page in the user's browser can still reach it: with DNS
+/// rebinding the page is same-origin with the API and reads every response,
+/// and even without that a plain cross-origin POST is delivered and consumes
+/// the pairing window. Two headers the browser sets and the page cannot
+/// override close both: `Host` must name loopback, and `Origin`, when a
+/// browser sends one, must belong to the extension. Every route sits behind
+/// this, including `/api/pair` and the 404 fallback.
+pub async fn require_local_origin(request: Request, next: Next) -> Response {
+    let host_ok = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| request.uri().authority().map(|a| a.to_string()))
+        .is_some_and(|authority| host_is_loopback(&authority));
+    let origin_ok = request
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .map(|v| v.to_str().is_ok_and(origin_is_extension))
+        .unwrap_or(true);
+    if !host_ok || !origin_ok {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
+/// `authority` is `host[:port]`; only the loopback names are ours.
+fn host_is_loopback(authority: &str) -> bool {
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        // Bracketed IPv6, "[::1]:9315".
+        match rest.find(']') {
+            Some(end) => &rest[..end],
+            None => return false,
+        }
+    } else {
+        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
+    };
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+/// Extension origins are the only browser origins with any business here.
+/// A page's `https://…` or an opaque `null` is refused.
+fn origin_is_extension(origin: &str) -> bool {
+    origin.starts_with("chrome-extension://")
+        || origin.starts_with("moz-extension://")
+        || origin.starts_with("safari-web-extension://")
+}
+
+#[cfg(test)]
+mod local_origin_tests {
+    use super::*;
+    use axum::{body::Body, http::Request as HttpRequest, routing::get, Router};
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/x", get(|| async { "ok" }))
+            .fallback(|| async { StatusCode::NOT_FOUND })
+            .layer(axum::middleware::from_fn(require_local_origin))
+    }
+
+    async fn status(host: Option<&str>, origin: Option<&str>) -> StatusCode {
+        let mut req = HttpRequest::builder().uri("/x");
+        if let Some(h) = host {
+            req = req.header("host", h);
+        }
+        if let Some(o) = origin {
+            req = req.header("origin", o);
+        }
+        app()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn loopback_hosts_pass() {
+        for h in [
+            "127.0.0.1:9315",
+            "127.0.0.1",
+            "localhost:9315",
+            "LOCALHOST",
+            "[::1]:9315",
+        ] {
+            assert_eq!(status(Some(h), None).await, StatusCode::OK, "{h}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rebound_or_missing_host_is_refused() {
+        // DNS rebinding: the page's own hostname now resolves to 127.0.0.1.
+        assert_eq!(
+            status(Some("evil.example:9315"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status(Some("127.0.0.1.evil.example"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(status(None, None).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn only_extension_origins_pass() {
+        assert_eq!(
+            status(Some("127.0.0.1"), Some("chrome-extension://abc")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(Some("127.0.0.1"), Some("moz-extension://abc")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(Some("127.0.0.1"), Some("https://evil.example")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status(Some("127.0.0.1"), Some("null")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status(Some("127.0.0.1"), Some("http://127.0.0.1:9315")).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn the_fallback_is_behind_the_gate_too() {
+        let req = HttpRequest::builder()
+            .uri("/nope")
+            .header("host", "evil.example")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app().oneshot(req).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+}
+
+#[cfg(test)]
+mod approval_needed_tests {
+    use super::*;
+
+    #[test]
+    fn only_decrypting_requests_are_gated() {
+        let approve = Some("approve");
+        assert!(approval_needed("secret.read", TokenScope::Secrets, approve));
+        assert!(approval_needed(
+            "secret.write",
+            TokenScope::Secrets,
+            approve
+        ));
+        assert!(approval_needed("page.read", TokenScope::Secrets, approve));
+        // What used to prompt, and must not: nothing here decrypts.
+        assert!(!approval_needed("status", TokenScope::Secrets, approve));
+        assert!(!approval_needed("page.list", TokenScope::Secrets, approve));
+        assert!(!approval_needed(
+            "folder.list",
+            TokenScope::Secrets,
+            approve
+        ));
+        assert!(!approval_needed("generate", TokenScope::Secrets, approve));
+        // Notes scope never decrypts, and no mode but approve prompts.
+        assert!(!approval_needed("secret.read", TokenScope::Notes, approve));
+        assert!(!approval_needed("secret.read", TokenScope::Secrets, None));
+        assert!(!approval_needed(
+            "secret.read",
+            TokenScope::Secrets,
+            Some("log")
+        ));
     }
 }

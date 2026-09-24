@@ -26,11 +26,13 @@ import { kbd } from "@/lib/platform";
 import { stripSecretValues } from "@/lib/strip-secrets";
 import { draftKeyFor, canPersistDraft } from "@/lib/drafts";
 import type { Page } from "@claspt/shared/types";
+import { SECRET_INPUT_PROPS } from "@/lib/secret-input";
 
 /** Lazy-load CodeMirror (~200KB) — only when editing a page. */
 const CodeMirrorEditor = lazy(() => import("@/components/editor/CodeMirrorEditor"));
 /** Lazy-load marked + dompurify (~35KB) — only in preview/split mode. */
 const MarkdownPreview = lazy(() => import("@/components/MarkdownPreview"));
+import { AttachDialogHost } from "@/components/editor/AttachDialog";
 
 type SaveStatus = "idle" | "unsaved" | "saving" | "saved" | "error";
 
@@ -175,6 +177,7 @@ function EncryptedOverlay({
         {mode === "require_password" && (
           <input
             type="password"
+            {...SECRET_INPUT_PROPS}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             onKeyDown={(e) => {
@@ -247,16 +250,16 @@ function PageEditor({ page }: { page: Page }) {
 
   // Draft persistence for crash recovery
   const draftKey = draftKeyFor(page.meta.id);
-  const [recoveredDraft, setRecoveredDraft] = useState<string | null>(null);
+  // A draft left behind by a crash is read once, when the pane mounts. One
+  // that matches the saved page has nothing to recover and is dropped below.
+  const [recoveredDraft, setRecoveredDraft] = useState<string | null>(() => {
+    const saved = localStorage.getItem(draftKey);
+    return saved && saved !== page.content ? saved : null;
+  });
 
-  // Check for recovered draft on mount
   useEffect(() => {
     const saved = localStorage.getItem(draftKey);
-    if (saved && saved !== page.content) {
-      setRecoveredDraft(saved);
-    } else if (saved) {
-      localStorage.removeItem(draftKey);
-    }
+    if (saved && saved === page.content) localStorage.removeItem(draftKey);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Synchronized scroll refs
@@ -327,6 +330,21 @@ function PageEditor({ page }: { page: Page }) {
       }
     },
     [page.path, updatePage, draftKey],
+  );
+
+  // A change made outside the editor (a secret card, an attachment deleted
+  // from the preview): save it now and reload the page so the editor shows
+  // the same text.
+  const applyExternalContent = useCallback(
+    async (newContent: string) => {
+      setLiveContent(newContent);
+      liveContentRef.current = newContent;
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      await doSave(newContent);
+      const { openPage } = usePagesStore.getState();
+      await openPage(page.path);
+    },
+    [doSave, page.path],
   );
 
   const handleChange = useCallback(
@@ -617,6 +635,7 @@ function PageEditor({ page }: { page: Page }) {
 
       {/* Editor Toolbar (hidden in preview-only mode) */}
       {editorMode !== "preview" && <EditorToolbar />}
+      <AttachDialogHost />
 
       {/* Editor / Preview area */}
       <div className="flex flex-1 overflow-hidden">
@@ -646,7 +665,10 @@ function PageEditor({ page }: { page: Page }) {
             className={`overflow-auto overscroll-none bg-surface ${editorMode === "split" ? "w-1/2" : "w-full"}`}
           >
             <Suspense fallback={<EditorSkeleton />}>
-              <MarkdownPreview content={liveContent} />
+              <MarkdownPreview
+                content={liveContent}
+                onContentChange={applyExternalContent}
+              />
             </Suspense>
           </div>
         )}
@@ -662,16 +684,7 @@ function PageEditor({ page }: { page: Page }) {
           autoHideDelay={(config?.secret_auto_hide_seconds ?? 30) * 1000}
           clipboardClearDelay={(config?.clipboard_clear_seconds ?? 30) * 1000}
           pagePath={page.path}
-          onContentChange={async (newContent) => {
-            // Update live content and save immediately
-            setLiveContent(newContent);
-            liveContentRef.current = newContent;
-            if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-            await doSave(newContent);
-            // Reload page to sync editor with new content
-            const { openPage } = usePagesStore.getState();
-            await openPage(page.path);
-          }}
+          onContentChange={applyExternalContent}
         />
       </div>
     </div>
@@ -747,7 +760,7 @@ export function EditorPane() {
     return (
       <div
         data-tour="editor"
-        className="flex flex-1 items-center justify-center bg-surface"
+        className="idle-glow flex flex-1 items-center justify-center bg-surface"
       >
         <div className="text-center">
           <div className="empty-state-icon mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl">

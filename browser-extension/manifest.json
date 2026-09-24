@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claspt \u2014 Password Auto-Fill",
-  "version": "2.6.2",
+  "version": "3.1.0",
   "description": "Companion extension for the Claspt desktop password manager \u2014 auto-fills credentials on web pages from your local vault.",
   "permissions": [
     "activeTab",
@@ -47,6 +47,16 @@
         "src/content/passkey-bridge.js"
       ],
       "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/page/passkey-provider.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
   "options_ui": {
@@ -68,17 +78,6 @@
     "48": "assets/icon-48.png",
     "128": "assets/icon-128.png"
   },
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "assets/logo-claspt.png",
-        "src/page/passkey-provider.js"
-      ],
-      "matches": [
-        "<all_urls>"
-      ]
-    }
-  ],
   "browser_specific_settings": {
     "gecko": {
       "id": "claspt@indivar.in",

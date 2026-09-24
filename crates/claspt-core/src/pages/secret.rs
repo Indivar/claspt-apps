@@ -146,13 +146,12 @@ pub fn redact_secrets(content: &str) -> String {
 
 /// Check if content contains any `:::secret[...]` blocks (outside code fences).
 pub fn has_secret_blocks(content: &str) -> bool {
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
     for line in content.lines() {
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             continue;
         }
-        if !in_code_fence && parse_secret_open(line).is_some() {
+        if !fence.is_open() && parse_secret_open(line).is_some() {
             return true;
         }
     }
@@ -165,13 +164,12 @@ pub fn has_secret_blocks(content: &str) -> bool {
 /// Skips `:::secret[...]` patterns inside fenced code blocks.
 pub fn extract_secret_labels(content: &str) -> Vec<String> {
     let mut labels = Vec::new();
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
     for line in content.lines() {
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             continue;
         }
-        if !in_code_fence {
+        if !fence.is_open() {
             if let Some(label) = parse_secret_open(line) {
                 labels.push(label);
             }
@@ -235,10 +233,77 @@ fn unescape_label(raw: &str) -> String {
     out
 }
 
-/// Check if a line opens or closes a markdown fenced code block (``` or ~~~).
-fn is_code_fence(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+/// Fenced code blocks, tracked the way CommonMark 4.5 defines them, so a
+/// `:::secret` fence inside a code example is left alone and one after the
+/// real closer is not.
+///
+/// A fence opens on a line whose first non-blank characters are three or
+/// more of one marker, ` or ~, and for backticks the rest of the line may not
+/// contain a backtick (that is inline code, not a fence). It closes only on a
+/// line that is nothing but that same marker, at least as many times. While
+/// it is open, everything else is content: a shorter run, the other marker,
+/// or a marker followed by an info string such as "```bash".
+///
+/// The old rule toggled on every marker line. A fence that quoted another
+/// fence, ordinary in a note about shell commands, put it one step out of
+/// phase with the editor: the editor showed a lock on the block below while
+/// this code treated the block as a code example and wrote its value to disk
+/// in plaintext. Every reader of a page shares this type so that cannot recur.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FenceTracker {
+    open: Option<(u8, usize)>,
+}
+
+impl FenceTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the line just observed, or an earlier one, opened a fence
+    /// that has not closed.
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Feed one line. Returns `true` when the line is itself a fence marker,
+    /// opening or closing, which callers copy through untouched. Returns
+    /// `false` for content, including marker-like lines inside an open fence.
+    pub fn observe(&mut self, line: &str) -> bool {
+        let trimmed = line.trim();
+        let Some((marker, run)) = fence_run(trimmed) else {
+            return false;
+        };
+        match self.open {
+            None => {
+                // "```foo```" is inline code by the spec, not an opener.
+                // Treating it as one would hide every block below it.
+                if marker == b'`' && trimmed[run..].contains('`') {
+                    return false;
+                }
+                self.open = Some((marker, run));
+                true
+            }
+            Some((open_marker, open_run)) => {
+                let closes = marker == open_marker
+                    && run >= open_run
+                    && trimmed.bytes().all(|b| b == marker);
+                if closes {
+                    self.open = None;
+                }
+                closes
+            }
+        }
+    }
+}
+
+/// The marker and its run length when `trimmed` starts with a fence run.
+fn fence_run(trimmed: &str) -> Option<(u8, usize)> {
+    let first = *trimmed.as_bytes().first()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let run = trimmed.bytes().take_while(|&b| b == first).count();
+    (run >= 3).then_some((first, run))
 }
 
 /// Generic transformer that processes each secret block's content through a callback.
@@ -252,7 +317,7 @@ where
     let mut result = String::with_capacity(content.len());
     let mut lines = content.lines().peekable();
     let mut first_line = true;
-    let mut in_code_fence = false;
+    let mut fence = FenceTracker::new();
 
     while let Some(line) = lines.next() {
         if !first_line {
@@ -261,13 +326,12 @@ where
         first_line = false;
 
         // Track fenced code blocks — don't process secrets inside them
-        if is_code_fence(line) {
-            in_code_fence = !in_code_fence;
+        if fence.observe(line) {
             result.push_str(line);
             continue;
         }
 
-        if !in_code_fence && parse_secret_open(line).is_some() {
+        if !fence.is_open() && parse_secret_open(line).is_some() {
             // Write the opening fence as-is
             result.push_str(line);
             result.push('\n');
@@ -763,5 +827,45 @@ actual-secret-value
         assert!(redacted.contains("# Note"));
         assert!(redacted.contains("Trailing text."));
         assert!(!redacted.contains("leak-me"));
+    }
+
+    #[test]
+    fn a_fence_that_quotes_a_fence_does_not_hide_the_block_after_it() {
+        // CommonMark 4.5: while a fence is open, a line carrying an info
+        // string such as "```bash" is content, not a closer, and only a
+        // marker-only line of the same character and at least the opener's
+        // length closes it. Toggling on every marker line is one fence out of
+        // step with the editor, which then shows a lock on a value that was
+        // written to disk in plaintext.
+        let content = "```\n```bash\necho hi\n```\n\n:::secret[Prod DB]\npassword: hunter2\n:::\n";
+        let key = [7u8; 32];
+        let out = encrypt_secrets(content, &key).unwrap();
+        assert!(
+            !out.contains("hunter2"),
+            "value reached disk in plaintext:\n{out}"
+        );
+        assert!(has_secret_blocks(content));
+        assert_eq!(extract_secret_labels(content), vec!["Prod DB".to_string()]);
+    }
+
+    #[test]
+    fn a_fence_closes_only_on_its_own_character_and_length() {
+        let key = [7u8; 32];
+        // A tilde fence is not closed by backticks.
+        let tilde = "~~~\n```\n:::secret[A]\nv: one\n:::\n~~~\n\n:::secret[B]\nv: two\n:::\n";
+        let out = encrypt_secrets(tilde, &key).unwrap();
+        assert!(
+            out.contains("v: one"),
+            "A is a code example and must stay as written"
+        );
+        assert!(
+            !out.contains("two"),
+            "B follows the real closer and must be sealed"
+        );
+        // A four-backtick fence is not closed by three.
+        let long = "````\n```\n:::secret[A]\nv: one\n:::\n````\n\n:::secret[B]\nv: two\n:::\n";
+        let out = encrypt_secrets(long, &key).unwrap();
+        assert!(out.contains("v: one"));
+        assert!(!out.contains("two"));
     }
 }

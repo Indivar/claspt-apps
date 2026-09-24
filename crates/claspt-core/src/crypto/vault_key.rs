@@ -60,15 +60,9 @@ fn write_vault_key_file(
     file_data.extend_from_slice(&salt);
     file_data.extend_from_slice(&encrypted_master_key);
 
-    // Write to temp file, set permissions, atomic rename
-    let tmp_path = vault_key_path.with_extension("key.tmp");
-    std::fs::write(&tmp_path, &file_data)?;
-    crate::fs_perms::restrict_to_owner(&tmp_path)?;
-
-    if let Err(e) = std::fs::rename(&tmp_path, vault_key_path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(CryptoError::from(e));
-    }
+    // Owner-only from creation, flushed, then renamed into place: the one
+    // file whose loss is the whole vault gets the careful writer.
+    crate::fs_perms::write_owner_only(vault_key_path, &file_data)?;
 
     Ok(())
 }
@@ -168,7 +162,10 @@ pub fn recover_with_key(
     // Verify recovery key against stored hash (if present)
     if let Some(expected_hash) = verify_hash {
         let actual_hash = compute_master_key_verify(&master_key);
-        if actual_hash != expected_hash {
+        if !crate::crypto::compare::constant_time_eq(
+            actual_hash.as_bytes(),
+            expected_hash.as_bytes(),
+        ) {
             return Err(CryptoError::InvalidVaultKey(
                 "recovery key does not match this vault".into(),
             ));
@@ -189,7 +186,11 @@ pub fn recover_with_key(
         backup.push(".recovery.bak");
         let backup_path = PathBuf::from(backup);
         if !backup_path.exists() {
-            std::fs::copy(vault_key_path, &backup_path).map_err(|e| {
+            // Through the same owner-only writer as the key file itself:
+            // `fs::copy` carries permission bits on Unix only, and the backup
+            // holds exactly what the original does.
+            let current = std::fs::read(vault_key_path)?;
+            crate::fs_perms::write_owner_only(&backup_path, &current).map_err(|e| {
                 CryptoError::InvalidVaultKey(format!("could not back up vault.key: {e}"))
             })?;
         }
@@ -224,12 +225,11 @@ pub fn compute_master_key_verify(master_key: &[u8]) -> String {
 /// page id, or field. An attacker with write access to the plaintext `.md`
 /// files could relocate an `enc:v1:` blob under a different label and it would
 /// still decrypt under the same master key. This does not disclose plaintext
-/// and requires filesystem write access. Binding `page_id + label` as AAD is
-/// the fix, but it changes the on-disk format: existing `enc:v1:` blobs were
-/// sealed with empty AAD, so it must ship as a versioned `enc:v2:` format with
-/// a decrypt fallback (try v2/AAD, then legacy empty-AAD) to avoid making every
-/// existing secret — on desktop AND the mobile app that shares this crate —
-/// undecryptable. Tracked as a deliberate, backward-compatible migration.
+/// and requires filesystem write access. Binding `page_id + label` as AAD
+/// would close it but changes the on-disk format for every secret on every
+/// platform; that migration was weighed and declined, see ADR 0004
+/// (`docs/adr/0004-secret-blocks-stay-enc-v1.md`). It is an accepted
+/// limitation, not planned work.
 pub fn encrypt_block(master_key: &[u8], plaintext: &str) -> Result<String, CryptoError> {
     let encrypted = aead::encrypt(master_key, plaintext.as_bytes())?;
     Ok(BASE64.encode(&encrypted))
@@ -455,6 +455,35 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn the_recovery_key_still_works_after_the_password_changes() {
+        // The recovery key is the master key, and change_password re-wraps that
+        // same key rather than replacing it. A sheet printed on day one has to
+        // keep working, which is what the sheet itself promises its reader.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.key");
+        let master_key = create_vault_key(test_password(), &path).unwrap();
+        let recovery_key = base64::engine::general_purpose::STANDARD.encode(&master_key);
+        let verify = compute_master_key_verify(&master_key);
+
+        change_password(test_password(), b"a-different-password", &path).unwrap();
+
+        // The old password is gone, the new one works.
+        assert!(unlock_vault_key(test_password(), &path).is_err());
+        let after = unlock_vault_key(b"a-different-password", &path).unwrap();
+        assert_eq!(
+            &master_key[..],
+            &after[..],
+            "the master key must not change"
+        );
+
+        // And the original recovery key still opens it.
+        let recovered =
+            recover_with_key(&recovery_key, b"a-third-password", &path, Some(&verify)).unwrap();
+        assert_eq!(&master_key[..], &recovered[..]);
+        assert!(unlock_vault_key(b"a-third-password", &path).is_ok());
+    }
+
     #[test]
     fn change_password_preserves_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;

@@ -14,17 +14,14 @@
 
 const STORAGE_KEY = "claspt_debug";
 let _enabled = false;
-let _loaded = false;
 
 /** Load debug state from storage (call once at startup) */
 export async function loadDebugState(): Promise<void> {
   try {
     const result = await chrome.storage.local.get(STORAGE_KEY);
     _enabled = result[STORAGE_KEY] === true;
-    _loaded = true;
   } catch {
     _enabled = false;
-    _loaded = true;
   }
 }
 

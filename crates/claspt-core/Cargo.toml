@@ -1,8 +1,8 @@
 [package]
 name = "claspt-core"
-version = "0.1.6"
+version = "0.1.13"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.94.1"
 description = "Shared crypto, sync, and git core for Claspt desktop and mobile"
 license = "PolyForm-Shield-1.0.0"
 
@@ -13,9 +13,11 @@ argon2 = "0.5"
 zeroize = { version = "1", features = ["derive"] }
 base64 = "0.22"
 sha2 = "0.10"
+# Constant-time comparison of hashes and tokens; see crypto/compare.rs.
+subtle = "2"
 
 # Git (no vendored-openssl — mobile does networking in JS, desktop uses reqwest)
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -31,7 +33,7 @@ slug = "0.1"
 
 # Async/Network (optional — desktop enables, mobile uses JS networking)
 tokio = { version = "1", features = ["sync", "time", "macros"], optional = true }
-reqwest = { version = "0.12", features = ["rustls-tls", "multipart"], optional = true }
+reqwest = { version = "0.13", features = ["rustls", "multipart"], optional = true }
 
 # FFI
 uniffi = "0.28"

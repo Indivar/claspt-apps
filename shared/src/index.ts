@@ -16,3 +16,6 @@ export * from "./generated-history";
 export * from "./secret-parser";
 export * from "./generator";
 export * from "./wordlists";
+export * from "./totp";
+export * from "./credential-fields";
+export * from "./attachments";

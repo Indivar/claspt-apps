@@ -26,8 +26,7 @@ class MathWidget extends WidgetType {
     span.className = "cm-math-preview";
     try {
       const katex = (window as unknown as Record<string, unknown>).__katex as
-        | { renderToString: (s: string, opts: object) => string }
-        | undefined;
+        { renderToString: (s: string, opts: object) => string } | undefined;
       if (katex) {
         // eslint-disable-next-line no-unsanitized/property -- KaTeX renderToString output; runs with trust:false and emits no raw HTML.
         span.innerHTML = katex.renderToString(this.formula, {

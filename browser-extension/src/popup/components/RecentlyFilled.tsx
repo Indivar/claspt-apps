@@ -1,16 +1,15 @@
 // Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState } from "react";
 import type { Credential, Message, RecentCredential } from "@/shared/types";
 import { STORAGE_KEY_RECENT } from "@/shared/constants";
 
 interface Props {
   onFill: (credential: Credential) => void;
-  onCopy: (text: string, label: string) => void;
 }
 
-export function RecentlyFilled({ onFill, onCopy }: Props) {
+export function RecentlyFilled({ onFill }: Props) {
   const [recent, setRecent] = useState<RecentCredential[]>([]);
 
   useEffect(() => {

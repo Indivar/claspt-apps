@@ -26,6 +26,9 @@ function openExternal(url: string) {
 import { useSyncStore } from "@/stores/sync-store";
 import * as cmd from "@/lib/commands";
 import { getVaultConfig, setVaultConfig } from "@/lib/commands";
+import { SyncProgressPanel } from "@/components/SyncProgressPanel";
+import { FRESH_COPY_STAGES, megabytes } from "@/lib/sync-progress";
+import { DEFAULT_ATTACHMENT_MB, formatSize, MAX_ATTACHMENT_MB } from "@/lib/attachments";
 import { ActivitySection } from "@/components/settings/ActivitySection";
 import { AutomationSection } from "@/components/settings/AutomationSection";
 
@@ -33,6 +36,9 @@ import { SpinnerIcon } from "@/components/ui/icons";
 import { useEscapeClose } from "@/hooks/use-escape-close";
 import { useExtensionStore } from "@/stores/extension-store";
 import type { LicenseStatus, VaultConfig } from "@claspt/shared/types";
+import { licenseTierLabel } from "@/lib/license";
+import { VERSION_DISPLAY } from "@/lib/version";
+import { ChangeMasterPassword } from "@/components/settings/ChangeMasterPassword";
 import { BrandLogo } from "@/components/BrandLogo";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { EmailRegistration } from "@/components/settings/EmailRegistration";
@@ -42,6 +48,7 @@ import { UpdateSection } from "@/components/settings/UpdateSection";
 import { ExtensionsTab } from "@/components/settings/ExtensionsTab";
 import { IntegrationsTab } from "@/components/settings/IntegrationsTab";
 import { MemoryTab } from "@/components/settings/MemoryTab";
+import { PasskeysTab } from "@/components/settings/PasskeysTab";
 import { LicensesTab } from "@/components/settings/LicensesTab";
 import { UtilitiesTab } from "@/components/settings/UtilitiesTab";
 import { ExportTab } from "@/components/settings/ExportTab";
@@ -53,14 +60,15 @@ type Section =
   | "integrations"
   | "memory"
   | "security"
-  | "sync"
+  | "passkeys"
   | "account"
   | "export"
   | "utilities"
   | "activity"
   | "automation"
   | "about";
-type UtilityId = "stats" | "health" | "duplicates" | "consolidate" | "tags" | "breach";
+type UtilityId =
+  "stats" | "health" | "duplicates" | "consolidate" | "tags" | "breach" | "trash";
 
 const UTILITY_ITEMS: { id: UtilityId; label: string }[] = [
   { id: "stats", label: "Vault Statistics" },
@@ -69,6 +77,7 @@ const UTILITY_ITEMS: { id: UtilityId; label: string }[] = [
   { id: "consolidate", label: "Consolidate" },
   { id: "tags", label: "Tag Manager" },
   { id: "breach", label: "Breach Check" },
+  { id: "trash", label: "Trash" },
 ];
 
 const FONT_FAMILIES = [
@@ -204,6 +213,8 @@ function SettingsContent({
   const [draft, setDraft] = useState<VaultConfig>({ ...initialConfig });
   const [saving, setSaving] = useState(false);
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
+  /** A licence that is present and has not expired. */
+  const hasActiveLicense = Boolean(licenseStatus?.is_pro && !licenseStatus.is_expired);
   const [licenseKey, setLicenseKey] = useState("");
   const [licenseLoading, setLicenseLoading] = useState(false);
   const [licenseError, setLicenseError] = useState<string | null>(null);
@@ -240,6 +251,25 @@ function SettingsContent({
 
   useEscapeClose(onCancel);
 
+  // Attachment usage, read when the Security tab opens; it sits beside the
+  // size limit so the owner sees what the vault already holds.
+  const [attachmentUsage, setAttachmentUsage] = useState<cmd.MediaUsage | null>(null);
+  useEffect(() => {
+    if (section !== "security") return;
+    let cancelled = false;
+    cmd
+      .mediaUsage()
+      .then((usage) => {
+        if (!cancelled) setAttachmentUsage(usage);
+      })
+      .catch(() => {
+        if (!cancelled) setAttachmentUsage(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section]);
+
   // Load license status on mount (needed by both Sync and Account tabs)
   useEffect(() => {
     let cancelled = false;
@@ -270,7 +300,7 @@ function SettingsContent({
         }
       }
 
-      // Auto-enable server features for Pro+ users
+      // Auto-enable server features once a licence is active
       if (status.is_pro && !draft.server_enabled) {
         setDraft((d) => ({ ...d, server_enabled: true }));
         await cmd.setVaultConfig({
@@ -313,15 +343,19 @@ function SettingsContent({
     }
   }, []);
 
-  const sections: { key: Section; label: string }[] = [
+  // Account and Sync were two tabs that were mostly the same subject — a
+  // licence, and the thing a licence buys — and both were nearly empty without
+  // one. `pro` marks a tab whose contents need a licence, so that is visible
+  // before clicking rather than after.
+  const sections: { key: Section; label: string; pro?: boolean }[] = [
     { key: "general", label: "General" },
     { key: "editor", label: "Editor" },
     { key: "extensions", label: "Extensions" },
     { key: "integrations", label: "Integrations" },
     { key: "memory", label: "Agent Memory" },
     { key: "security", label: "Security" },
-    { key: "sync", label: "Sync" },
-    { key: "account", label: "Account" },
+    { key: "passkeys", label: "Passkeys" },
+    { key: "account", label: "Account & Sync", pro: true },
     { key: "export", label: "Import / Export" },
     { key: "utilities", label: "Utilities" },
     { key: "activity", label: "Activity" },
@@ -348,7 +382,14 @@ function SettingsContent({
                       : "text-text-secondary hover:bg-surface-overlay"
                   }`}
                 >
-                  {s.label}
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="truncate">{s.label}</span>
+                    {s.pro && !hasActiveLicense && (
+                      <span className="shrink-0 rounded-full border border-border/70 px-1.5 py-[1px] text-[9px] font-semibold uppercase leading-none tracking-wider text-text-muted">
+                        Pro
+                      </span>
+                    )}
+                  </span>
                 </button>
                 {/* Utility sub-items nested under Utilities */}
                 {s.key === "utilities" && section === "utilities" && (
@@ -552,6 +593,28 @@ function SettingsContent({
                   Configure how secrets are displayed, when the clipboard is cleared, and
                   how Claspt locks itself to protect your data when you step away.
                 </p>
+                <SectionHeader title="Trash" />
+                <NumberField
+                  label="Keep deleted pages for"
+                  value={draft.trash_retention_days ?? 30}
+                  min={7}
+                  max={90}
+                  suffix="days"
+                  onChange={(v) =>
+                    updateDraft(
+                      "trash_retention_days",
+                      Math.min(Math.max(Math.round(v) || 7, 7), 90),
+                    )
+                  }
+                />
+                <p className="pb-2 text-[11px] leading-relaxed text-text-muted/60">
+                  A deleted page waits in the trash (Settings › Utilities › Trash) and can
+                  be restored until then; older entries are removed when the vault is
+                  unlocked. Only deletion goes to the trash: an edit keeps its history in
+                  the version log. The vault&apos;s git history still holds every purged
+                  page.
+                </p>
+
                 <SectionHeader title="Secrets" />
                 <NumberField
                   label="Auto-hide Secrets After"
@@ -602,17 +665,63 @@ function SettingsContent({
                       : "Shows a lock screen when you open an encrypted page. Click 'Reveal' to decrypt and view the content. Protects against shoulder-surfing — someone walking by won't see your secrets."}
                 </p>
 
+                <SectionHeader title="Attachments" />
+                <NumberField
+                  label="Size limit per attachment"
+                  value={draft.attachment_size_limit_mb ?? DEFAULT_ATTACHMENT_MB}
+                  min={1}
+                  max={MAX_ATTACHMENT_MB}
+                  suffix="MB"
+                  onChange={(v) =>
+                    updateDraft(
+                      "attachment_size_limit_mb",
+                      Math.min(Math.max(Math.round(v) || 1, 1), MAX_ATTACHMENT_MB),
+                    )
+                  }
+                />
+                <div className="flex items-center justify-between py-2.5">
+                  <span className="text-[13px] text-text-primary">In this vault</span>
+                  <span className="text-[13px] text-text-secondary">
+                    {attachmentUsage
+                      ? `${attachmentUsage.files} ${attachmentUsage.files === 1 ? "file" : "files"}, ${formatSize(attachmentUsage.bytes)}`
+                      : "…"}
+                  </span>
+                </div>
+                <p className="pb-2 text-[11px] leading-relaxed text-text-muted/60">
+                  A file over the limit is refused with both sizes shown; the attach
+                  dialog can raise the limit up to {MAX_ATTACHMENT_MB} MB or resize an
+                  image to fit. Claspt never shrinks, re-encodes or strips a file on its
+                  own.
+                </p>
+                <SelectField
+                  label="Encrypt box starts"
+                  value={draft.attachment_encrypt_default ? "ticked" : "unticked"}
+                  options={[
+                    { label: "Unticked", value: "unticked" },
+                    { label: "Ticked", value: "ticked" },
+                  ]}
+                  onChange={(v) =>
+                    updateDraft("attachment_encrypt_default", v === "ticked")
+                  }
+                />
+                <p className="pb-2 text-[11px] leading-relaxed text-text-muted/60">
+                  The attach dialog asks for every file. This is only how the box starts,
+                  and it follows your last answer. An unencrypted file can be read from
+                  the vault folder in Finder; an encrypted one opens only inside Claspt.
+                </p>
+
                 <SectionHeader title="Locking" />
                 <p className="pb-1 text-[11px] leading-relaxed text-text-muted/60">
                   Claspt uses two lock levels.{" "}
-                  <strong className="text-text-muted/80">Screen lock</strong> hides the UI
-                  but keeps the API, browser extension, and MCP working.{" "}
-                  <strong className="text-text-muted/80">Key lock</strong> zeros the
-                  master key from memory — secrets become inaccessible everywhere until
-                  you re-enter your password.
+                  <strong className="text-text-muted/80">Screen lock</strong> hides the
+                  vault on screen.{" "}
+                  <strong className="text-text-muted/80">Key lock</strong> clears the
+                  master key from memory, and from then on nothing can read a secret: not
+                  the app, the browser extension, MCP or the API, until you enter your
+                  password again.
                 </p>
                 <NumberField
-                  label="Screen Lock (UI hide)"
+                  label="Screen Lock (hide the vault)"
                   value={draft.auto_lock_minutes}
                   min={1}
                   max={120}
@@ -620,22 +729,22 @@ function SettingsContent({
                   onChange={(v) => updateDraft("auto_lock_minutes", v)}
                 />
                 <p className="pb-2 text-[11px] leading-relaxed text-text-muted/60">
-                  After this idle time, the UI locks but the master key stays in memory.
-                  API, browser extension, and MCP continue working. Re-enter your password
-                  or use biometric to unlock the screen.
+                  After this idle time the vault is hidden on screen. Unlock it with your
+                  password or biometrics. Whether tools keep working behind the locked
+                  screen is decided by Key lock below.
                 </p>
                 <NumberField
-                  label="Key Lock (zero master key)"
+                  label="Key Lock (clear the master key)"
                   value={draft.key_lock_minutes ?? 0}
                   min={0}
-                  max={480}
+                  max={1440}
                   suffix="min"
                   onChange={(v) => updateDraft("key_lock_minutes", v)}
                 />
                 <p className="pb-2 text-[11px] leading-relaxed text-text-muted/60">
                   {(draft.key_lock_minutes ?? 0) === 0
-                    ? "Disabled — master key stays in memory until the app quits. Most convenient: browser extension and MCP always have access to secrets."
-                    : `After ${draft.key_lock_minutes} minutes of idle, the master key is zeroed from memory. All secret access stops — browser extension, MCP, and API will return errors until you re-enter your password. Set higher than screen lock for maximum security with less friction.`}
+                    ? "0 means tied to Screen lock: the master key is cleared the moment the screen locks, so the browser extension, MCP and API stop until you unlock. This is the safest setting."
+                    : `The master key is cleared after ${draft.key_lock_minutes} minutes with no activity in the app or from a connected tool. A request from the browser extension, MCP or the API counts as activity, so a tool at work keeps working behind the locked screen. Must be at least the Screen lock time.`}
                 </p>
 
                 {biometricAvailable && (
@@ -651,7 +760,7 @@ function SettingsContent({
                       ]}
                       onChange={async (v) => {
                         if (vaultDir) {
-                          const ok = await toggleBiometric(vaultDir, v);
+                          const ok = await toggleBiometric(v);
                           if (ok) updateDraft("biometric_mode", v);
                         }
                       }}
@@ -665,6 +774,34 @@ function SettingsContent({
                     </p>
                   </div>
                 )}
+
+                <SectionHeader title="Master Password" />
+                <ChangeMasterPassword
+                  syncConfigured={
+                    draft.sync_backend === "hosted" || draft.sync_backend === "gdrive"
+                  }
+                />
+
+                <SectionHeader title="Recovery Key" />
+                {draft.recovery_key_saved_path ? (
+                  <p className="pb-2 text-[11px] leading-relaxed text-text-muted/60">
+                    Saved to{" "}
+                    <span className="break-all text-text-secondary">
+                      {draft.recovery_key_saved_path}
+                    </span>
+                    {draft.recovery_key_saved_at
+                      ? ` on ${draft.recovery_key_saved_at}`
+                      : ""}
+                    . Claspt records where you put it, never the key itself. If you have
+                    moved or deleted that file, save a new copy from the key you kept.
+                  </p>
+                ) : (
+                  <p className="pb-2 text-[11px] leading-relaxed text-text-muted/60">
+                    No saved location recorded on this device. The recovery key is shown
+                    only when a vault is created, so if you no longer have it, change your
+                    master password to be issued a new one.
+                  </p>
+                )}
               </>
             )}
 
@@ -677,20 +814,13 @@ function SettingsContent({
             )}
 
             {section === "memory" && <MemoryTab />}
-
-            {section === "sync" && (
-              <SyncSection
-                draft={draft}
-                updateDraft={updateDraft}
-                licenseStatus={licenseStatus}
-              />
-            )}
+            {section === "passkeys" && <PasskeysTab />}
 
             {section === "account" && (
               <>
-                <p className="mb-4 text-[13px] text-text-secondary leading-relaxed">
-                  Manage your license, email registration, shared credentials, server
-                  connection, and app updates.
+                <p className="mb-4 text-[13px] leading-relaxed text-text-secondary">
+                  Your licence, and what it unlocks: syncing to your other devices,
+                  sharing, and the mobile apps.
                 </p>
                 {/* License Status */}
                 <SectionHeader title="License" />
@@ -703,13 +833,7 @@ function SettingsContent({
                         }`}
                       />
                       <span className="text-sm font-medium text-text-primary">
-                        {licenseStatus.is_trial
-                          ? "Trial"
-                          : licenseStatus.tier === "pro_plus"
-                            ? "Pro+"
-                            : licenseStatus.tier === "pro"
-                              ? "Pro"
-                              : licenseStatus.tier || "Free"}
+                        {licenseTierLabel(licenseStatus)}
                       </span>
                       {licenseStatus.is_expired && (
                         <span className="text-xs text-red-500">Expired</span>
@@ -727,11 +851,7 @@ function SettingsContent({
 
                     {licenseStatus.days_remaining != null && (
                       <div className="flex items-center justify-between py-1">
-                        <span className="text-sm text-text-muted">
-                          {licenseStatus.is_trial
-                            ? "Trial days remaining"
-                            : "Days remaining"}
-                        </span>
+                        <span className="text-sm text-text-muted">Days remaining</span>
                         <span className="text-sm text-text-primary">
                           {licenseStatus.days_remaining}
                         </span>
@@ -748,7 +868,7 @@ function SettingsContent({
                     )}
 
                     {/* Deactivate button for active licenses */}
-                    {!licenseStatus.is_trial && !licenseStatus.is_expired && (
+                    {licenseStatus.is_pro && !licenseStatus.is_expired && (
                       <button
                         onClick={handleDeactivateLicense}
                         disabled={licenseLoading}
@@ -763,72 +883,40 @@ function SettingsContent({
                 )}
 
                 {/* Get Pro — shown when no active license */}
-                {(!licenseStatus?.is_pro ||
-                  licenseStatus?.is_expired ||
-                  licenseStatus?.is_trial) && (
+                {(!licenseStatus?.is_pro || licenseStatus?.is_expired) && (
                   <>
                     <SectionHeader title="Get Pro" />
                     <p className="pb-3 text-[12px] leading-relaxed text-text-muted">
                       Unlock cloud sync, import from password managers, sharing, and more.
                     </p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="rounded-lg border border-border/60 p-3">
-                        <div className="text-[13px] font-semibold text-text-primary">
-                          Pro
-                        </div>
-                        <p className="mt-0.5 text-[10px] text-text-dim">
-                          Sync up to 5 devices
-                        </p>
-                        <div className="mt-2 flex flex-col gap-1.5">
-                          <button
-                            onClick={() =>
-                              openExternal(
-                                "https://buy.stripe.com/14AaEWePl6p863GfAEe7m02",
-                              )
-                            }
-                            className="rounded-md bg-accent px-3 py-1.5 text-center text-[11px] font-medium text-white hover:bg-accent-hover transition-colors"
-                          >
-                            Annual
-                          </button>
-                          <button
-                            onClick={() =>
-                              openExternal(
-                                "https://buy.stripe.com/14AaEW0YvaFo1Nq3RWe7m03",
-                              )
-                            }
-                            className="rounded-md border border-accent/40 px-3 py-1.5 text-center text-[11px] font-medium text-accent hover:bg-accent/10 transition-colors"
-                          >
-                            Monthly
-                          </button>
-                        </div>
+                    {/* One tier. A Pro+ card sat here offering "Vault storage,
+                        10 devices", which no longer exists, and the Pro card
+                        claimed a device count that is really carried per-licence
+                        in the token rather than fixed. */}
+                    <div className="rounded-lg border border-border/60 p-3">
+                      <div className="text-[13px] font-semibold text-text-primary">
+                        Pro
                       </div>
-                      <div className="rounded-lg border border-accent/30 bg-accent/5 p-3">
-                        <div className="text-[13px] font-semibold text-accent">Pro+</div>
-                        <p className="mt-0.5 text-[10px] text-text-dim">
-                          Vault storage, 10 devices
-                        </p>
-                        <div className="mt-2 flex flex-col gap-1.5">
-                          <button
-                            onClick={() =>
-                              openExternal(
-                                "https://buy.stripe.com/3cI5kCdLh4h0fEg748e7m00",
-                              )
-                            }
-                            className="rounded-md bg-accent px-3 py-1.5 text-center text-[11px] font-medium text-white hover:bg-accent-hover transition-colors"
-                          >
-                            Annual
-                          </button>
-                          <button
-                            onClick={() =>
-                              openExternal(
-                                "https://buy.stripe.com/00waEWePlbJs8bO2NSe7m01",
-                              )
-                            }
-                            className="rounded-md border border-accent/40 px-3 py-1.5 text-center text-[11px] font-medium text-accent hover:bg-accent/10 transition-colors"
-                          >
-                            Monthly
-                          </button>
-                        </div>
+                      <p className="mt-0.5 text-[11px] text-text-dim">
+                        Sync, sharing and the mobile apps
+                      </p>
+                      <div className="mt-2 grid grid-cols-2 gap-1.5">
+                        <button
+                          onClick={() =>
+                            openExternal("https://buy.stripe.com/14AaEWePl6p863GfAEe7m02")
+                          }
+                          className="rounded-md bg-accent px-3 py-1.5 text-center text-[11px] font-medium text-white transition-colors hover:bg-accent-hover"
+                        >
+                          Annual
+                        </button>
+                        <button
+                          onClick={() =>
+                            openExternal("https://buy.stripe.com/14AaEW0YvaFo1Nq3RWe7m03")
+                          }
+                          className="rounded-md border border-accent/40 px-3 py-1.5 text-center text-[11px] font-medium text-accent transition-colors hover:bg-accent/10"
+                        >
+                          Monthly
+                        </button>
                       </div>
                     </div>
                     <p className="mt-2 text-[10px] text-text-dim">
@@ -839,9 +927,7 @@ function SettingsContent({
                 )}
 
                 {/* Activate License — only shown when no active license */}
-                {(!licenseStatus?.is_pro ||
-                  licenseStatus?.is_expired ||
-                  licenseStatus?.is_trial) && (
+                {(!licenseStatus?.is_pro || licenseStatus?.is_expired) && (
                   <>
                     <SectionHeader title="Activate License" />
                     <div className="space-y-2">
@@ -882,7 +968,7 @@ function SettingsContent({
                       {licenseStatus.email}
                     </span>
                     <span className="text-[11px] text-text-muted">
-                      (from {licenseStatus.tier === "pro_plus" ? "Pro+" : "Pro"} license)
+                      (from your Pro licence)
                     </span>
                   </div>
                 ) : (
@@ -893,40 +979,59 @@ function SettingsContent({
                 <SectionHeader title="Incoming Shares" />
                 <IncomingShares />
 
-                {/* Server Connection */}
-                <SectionHeader title="Server Connection" />
-                <p className="mb-3 text-[12px] leading-relaxed text-text-muted">
-                  When enabled, Claspt periodically checks app.claspt.app for incoming
-                  shares and app updates.
-                </p>
-
-                <div className="flex items-center justify-between py-2.5">
-                  <span className="text-[13px] text-text-primary">
-                    Enable Server Features
-                  </span>
-                  <button
-                    role="switch"
-                    aria-checked={draft.server_enabled === true}
-                    onClick={() => updateDraft("server_enabled", !draft.server_enabled)}
-                    className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
-                      draft.server_enabled ? "bg-accent" : "bg-border"
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
-                        draft.server_enabled ? "translate-x-4" : ""
-                      }`}
-                    />
-                  </button>
-                </div>
-
-                {draft.server_enabled && (
+                {/* Share delivery.
+                    This was one switch called "Enable Server Features" doing
+                    two unrelated jobs: collecting shares, which needs a licence,
+                    and checking for updates, which does not. A free user was
+                    offered a toggle that turned on nothing they could use, and
+                    turning it off to avoid that also turned off their update
+                    checks. They are separate now. */}
+                {hasActiveLicense && (
                   <>
-                    <ServerStatus />
-                    <SectionHeader title="App Updates" />
-                    <UpdateSection />
+                    <SectionHeader title="Share Delivery" />
+                    <p className="mb-3 text-[12px] leading-relaxed text-text-muted">
+                      Claspt checks app.claspt.app for credentials shared with you.
+                      Nothing is uploaded, and shares are decrypted on this computer.
+                    </p>
+
+                    <div className="flex items-center justify-between py-2.5">
+                      <span className="text-[13px] text-text-primary">
+                        Check for incoming shares
+                      </span>
+                      <button
+                        role="switch"
+                        aria-checked={draft.server_enabled === true}
+                        onClick={() =>
+                          updateDraft("server_enabled", !draft.server_enabled)
+                        }
+                        className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                          draft.server_enabled ? "bg-accent" : "bg-border"
+                        }`}
+                      >
+                        <span
+                          className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                            draft.server_enabled ? "translate-x-4" : ""
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    {draft.server_enabled && <ServerStatus />}
                   </>
                 )}
+
+                {/* Updates are not a paid feature. A security tool wants
+                    everyone on a current build, including people who have not
+                    paid for anything. */}
+                <SectionHeader title="App Updates" />
+                <UpdateSection />
+
+                <SectionHeader title="Sync" />
+                <SyncSection
+                  draft={draft}
+                  updateDraft={updateDraft}
+                  licenseStatus={licenseStatus}
+                />
               </>
             )}
 
@@ -1001,28 +1106,29 @@ function AdvancedSyncRecovery() {
   const [confirmText, setConfirmText] = useState("");
   const [forcePushing, setForcePushing] = useState(false);
   const [forcePushResult, setForcePushResult] = useState<string | null>(null);
-  const { fetchV2Status } = useSyncStore();
+  const retryFreshCopy = useSyncStore((s) => s.retryFreshCopy);
 
   const CONFIRM_PHRASE = "force push";
   const armed = confirmText.trim().toLowerCase() === CONFIRM_PHRASE;
 
+  // Runs through the store so the steps and the clock show while the copy
+  // is packed and uploaded, the same as the vault-and-account fix.
   async function runForcePush() {
     if (!armed) return;
     setForcePushing(true);
-    setForcePushResult("Starting force push...");
-    try {
-      const result = await cmd.syncV2ForcePush();
-      useSyncStore.setState({ error: null });
+    setForcePushResult(null);
+    const pushed = await retryFreshCopy();
+    if (pushed) {
       setForcePushResult(
-        `Pushed successfully (v${result.version}, ${result.bytes_uploaded} bytes)`,
+        `Pushed successfully (v${pushed.version}, ${megabytes(pushed.bytes_uploaded)})`,
       );
       setConfirmText("");
-      fetchV2Status();
-    } catch (e) {
-      setForcePushResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setForcePushing(false);
+    } else {
+      setForcePushResult(
+        `Error: ${useSyncStore.getState().error ?? "the copy did not go up"}`,
+      );
     }
+    setForcePushing(false);
   }
 
   return (
@@ -1080,6 +1186,11 @@ function AdvancedSyncRecovery() {
             autoCapitalize="none"
             className="mb-2 w-full rounded-md border border-border/60 bg-surface px-3 py-1.5 text-[12px] font-mono text-text-primary placeholder:text-text-muted/60 focus:border-danger focus:outline-none"
           />
+          {forcePushing && (
+            <div className="mb-2">
+              <SyncProgressPanel stages={FRESH_COPY_STAGES} />
+            </div>
+          )}
           {forcePushResult && (
             <p
               className={`mb-2 text-[11px] ${forcePushResult.startsWith("Error") ? "text-danger" : "text-green-600"}`}
@@ -1204,8 +1315,8 @@ function SyncSection({
               onChange={(e) => setSetupBackend(e.target.value as "hosted" | "gdrive")}
               className="focus-accent rounded-lg border border-border/60 bg-surface px-2.5 py-1.5 text-[13px] text-text-primary outline-none"
             >
-              <option value="hosted">Claspt Sync (Pro+)</option>
-              <option value="gdrive">Google Drive (Pro)</option>
+              <option value="hosted">Claspt Sync</option>
+              <option value="gdrive">Google Drive</option>
             </select>
           </div>
 
@@ -1547,21 +1658,89 @@ function SyncSection({
   );
 }
 
-/** About section header — app identity plus a button to open full details. */
+/**
+ * About: which build this is, what it is licensed under, and where to write.
+ *
+ * It used to show the app name and the company and nothing else — not the
+ * version, so a bug report could not say which build it came from, and not the
+ * licence, which matters now the source is published. The plan is here too,
+ * because About is where people look to answer "what have I actually got".
+ */
 function AboutSection({ onOpenAbout }: { onOpenAbout: () => void }) {
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    cmd
+      .getLicenseStatus()
+      .then((s) => {
+        if (!cancelled) setLicenseStatus(s);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <>
       <SectionHeader title="Application" />
       <div className="space-y-3 py-2">
         <div className="flex items-center gap-3">
           <BrandLogo size="icon" />
-          <div>
-            <p className="text-sm font-semibold text-text-primary">Claspt</p>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-semibold text-text-primary">Claspt</p>
+              {licenseStatus && (
+                <span
+                  className={`rounded-full border px-2 py-[1px] text-[10px] font-semibold uppercase leading-none tracking-wider ${
+                    licenseStatus.is_pro && !licenseStatus.is_expired
+                      ? "border-accent/35 bg-accent/10 text-accent"
+                      : "border-border/70 bg-surface-overlay/50 text-text-muted"
+                  }`}
+                >
+                  {licenseTierLabel(licenseStatus)}
+                </span>
+              )}
+            </div>
             <p className="text-[12px] text-text-muted">
               By Indivar Software Solutions Limited
             </p>
           </div>
         </div>
+
+        <dl className="space-y-1.5 text-[12.5px]">
+          <AboutRow label="Version">
+            <span className="font-mono text-[12px]">{VERSION_DISPLAY}</span>
+          </AboutRow>
+          <AboutRow label="Plan">
+            {licenseStatus
+              ? licenseStatus.is_pro && !licenseStatus.is_expired
+                ? licenseStatus.email
+                  ? `Pro — ${licenseStatus.email}`
+                  : "Pro"
+                : "Free — sync, sharing and the mobile apps need Pro"
+              : "…"}
+          </AboutRow>
+          <AboutRow label="Licence">PolyForm Shield License 1.0.0</AboutRow>
+          <AboutRow label="Support">
+            <a
+              href="mailto:support@claspt.app"
+              className="text-accent transition-opacity hover:opacity-80"
+            >
+              support@claspt.app
+            </a>
+          </AboutRow>
+          <AboutRow label="Security">
+            <a
+              href="mailto:security@claspt.app"
+              className="text-accent transition-opacity hover:opacity-80"
+            >
+              security@claspt.app
+            </a>
+          </AboutRow>
+        </dl>
+
         <button
           onClick={onOpenAbout}
           className="rounded-lg border border-border/60 px-3 py-1.5 text-[13px] font-medium text-text-secondary transition-all hover:bg-surface-overlay active:scale-95"
@@ -1570,6 +1749,16 @@ function AboutSection({ onOpenAbout }: { onOpenAbout: () => void }) {
         </button>
       </div>
     </>
+  );
+}
+
+/** One label/value row, so the column of labels lines up. */
+function AboutRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex gap-3">
+      <dt className="w-[74px] shrink-0 text-text-muted">{label}</dt>
+      <dd className="min-w-0 text-text-secondary">{children}</dd>
+    </div>
   );
 }
 

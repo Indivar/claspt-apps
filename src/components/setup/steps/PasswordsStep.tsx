@@ -1,10 +1,9 @@
 // Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import * as cmd from "@/lib/commands";
 import { StepHeading, StepFooter } from "@/components/setup/WizardFrame";
+import { useExtensionPairing } from "@/hooks/use-extension-pairing";
 
 /** Where each browser's listing lives. Opened externally, never navigated to. */
 const STORE_URLS: Record<string, string> = {
@@ -31,55 +30,7 @@ export function PasswordsStep({
   onNext: () => void;
   onBack: () => void;
 }) {
-  const [pairing, setPairing] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(0);
-  const [connected, setConnected] = useState(false);
-  const wasArmed = useRef(false);
-
-  const beginPairing = useCallback(async () => {
-    try {
-      // The extension needs to decrypt in order to fill a password, so this is
-      // the one client that genuinely requires the secrets scope.
-      await cmd.beginExtensionPairing("secrets");
-      wasArmed.current = false;
-      setPairing(true);
-    } catch {
-      setPairing(false);
-    }
-  }, []);
-
-  // Watch the pairing window. The window closing after it opened is what tells
-  // us the extension took the token — there is nothing else to observe.
-  useEffect(() => {
-    if (!pairing) return;
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const status = await cmd.extensionPairingStatus();
-        if (cancelled) return;
-        if (status.armed) {
-          wasArmed.current = true;
-          setSecondsLeft(status.secondsLeft);
-          return;
-        }
-        if (wasArmed.current) setConnected(true);
-        setPairing(false);
-      } catch {
-        if (!cancelled) setPairing(false);
-      }
-    };
-
-    void poll();
-    const id = setInterval(poll, 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [pairing]);
-
-  // Leaving the step closes the window rather than letting it sit open.
-  useEffect(() => () => void cmd.cancelExtensionPairing().catch(() => {}), []);
+  const { pairing, secondsLeft, connected, begin: beginPairing } = useExtensionPairing();
 
   return (
     <>

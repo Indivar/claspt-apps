@@ -16,9 +16,8 @@ use super::error::CryptoError;
 
 /// Nonce length for AES-256-GCM (96 bits = 12 bytes).
 pub const NONCE_LEN: usize = 12;
-
 /// AES-256-GCM authentication tag length (128 bits = 16 bytes).
-const TAG_LEN: usize = 16;
+pub const TAG_LEN: usize = 16;
 
 /// A nonce sequence that uses a single pre-generated random nonce.
 /// Used for one-shot encrypt/decrypt operations.

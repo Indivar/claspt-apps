@@ -3,6 +3,13 @@
 
 import { useState } from "react";
 import { generatePassword, generatePassphrase, generatePin } from "@/shared/generator";
+import {
+  SECRET_TEMPLATES,
+  fieldName,
+  oneLine,
+  wantsGenerator,
+  type SecretTemplateSpec,
+} from "@claspt/shared/secret-templates";
 
 type GenMode = "password" | "passphrase" | "pin";
 
@@ -64,40 +71,65 @@ function runGenerator(o: GenOpts): string {
 
 interface QuickAddFormProps {
   domain: string;
-  onSave: (data: { label: string; fields: Record<string, string> }) => void;
+  onSave: (data: {
+    template: string;
+    label: string;
+    fields: Record<string, string>;
+  }) => void;
   onCancel: () => void;
 }
 
-type Template = "password" | "api_key" | "ssh_key" | "env_var" | "license_key" | "credit_card" | "custom";
+/** The custom template: two blank fields and an Add field button. */
+const CUSTOM: SecretTemplateSpec = {
+  id: "custom",
+  name: "Custom",
+  icon: "plus",
+  tag: "custom",
+  fields: [{ label: "Field 1" }, { label: "Field 2" }],
+};
 
-const TEMPLATES: { id: Template; label: string; icon: string; fields: string[] }[] = [
-  { id: "password", label: "Password", icon: "🔑", fields: ["URL", "Username", "Password"] },
-  { id: "api_key", label: "API Key", icon: "🔧", fields: ["Service", "API Key", "Secret"] },
-  { id: "ssh_key", label: "SSH Key", icon: "🖥️", fields: ["Host", "Username", "Private Key"] },
-  { id: "env_var", label: "Env Variable", icon: "📋", fields: ["Variable", "Value"] },
-  { id: "license_key", label: "License Key", icon: "📄", fields: ["Product", "License Key", "Email"] },
-  { id: "credit_card", label: "Credit Card", icon: "💳", fields: ["Card Number", "Expiry", "CVV", "Name"] },
-  { id: "custom", label: "Custom", icon: "✏️", fields: ["Key", "Value"] },
-];
+/** The shared list plus Custom; the desktop picker shows the same set. */
+const TEMPLATES: readonly SecretTemplateSpec[] = [...SECRET_TEMPLATES, CUSTOM];
+
+const ICONS: Record<string, string> = {
+  globe: "🌐",
+  mail: "✉️",
+  server: "🖥️",
+  terminal: "⌨️",
+  database: "🗄️",
+  key: "🔑",
+  gear: "⚙️",
+  licence: "📄",
+  card: "💳",
+  bank: "🏦",
+  wifi: "📶",
+  id: "🪪",
+  wallet: "👛",
+  plus: "✏️",
+};
 
 const inputClass =
   "w-full rounded-md border border-border bg-surface-raised px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-dim outline-none focus:border-accent";
 const labelClass = "text-[10px] font-medium text-text-muted mb-0.5 block";
 
 export function QuickAddForm({ domain, onSave, onCancel }: QuickAddFormProps) {
-  const [template, setTemplate] = useState<Template | null>(null);
+  const [template, setTemplate] = useState<SecretTemplateSpec | null>(null);
   const [label, setLabel] = useState(domain);
   const [fields, setFields] = useState<Record<string, string>>({});
+  /** Extra fields added under Custom, in order. */
+  const [customKeys, setCustomKeys] = useState<string[]>([]);
   const [genOpen, setGenOpen] = useState<string | null>(null); // field name whose generator panel is open
   const [genOpts, setGenOpts] = useState<GenOpts>(DEFAULT_GEN_OPTS);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSave({ label, fields });
+    if (!template) return;
+    onSave({ template: template.id, label, fields });
   };
 
+  // Block fields are single lines: a pasted key or seed phrase is joined.
   const updateField = (key: string, value: string) => {
-    setFields({ ...fields, [key]: value });
+    setFields({ ...fields, [key]: oneLine(value) });
   };
 
   // ── Template Picker ──
@@ -105,24 +137,32 @@ export function QuickAddForm({ domain, onSave, onCancel }: QuickAddFormProps) {
     return (
       <div className="p-3 border-t border-border space-y-2">
         <div className="flex items-center justify-between">
-          <span className="text-[11px] font-semibold text-text-primary">Add New Credential</span>
-          <button onClick={onCancel} className="text-[10px] text-text-dim hover:text-text-muted">Cancel</button>
+          <span className="text-[11px] font-semibold text-text-primary">
+            Add New Credential
+          </span>
+          <button
+            onClick={onCancel}
+            className="text-[10px] text-text-dim hover:text-text-muted"
+          >
+            Cancel
+          </button>
         </div>
         <div className="grid grid-cols-3 gap-1.5">
           {TEMPLATES.map((t) => (
             <button
               key={t.id}
               onClick={() => {
-                setTemplate(t.id);
-                // Pre-fill URL for password template
-                if (t.id === "password" && domain) {
+                setTemplate(t);
+                setCustomKeys([]);
+                // Pre-fill the site for a login
+                if (t.id === "login" && domain) {
                   setFields({ URL: `https://${domain}` });
                 }
               }}
               className="flex flex-col items-center gap-1 rounded-md border border-border p-2 text-[10px] text-text-muted hover:border-accent hover:text-accent transition-colors"
             >
-              <span className="text-base">{t.icon}</span>
-              <span>{t.label}</span>
+              <span className="text-base">{ICONS[t.icon] ?? "🔐"}</span>
+              <span>{t.name}</span>
             </button>
           ))}
         </div>
@@ -130,7 +170,8 @@ export function QuickAddForm({ domain, onSave, onCancel }: QuickAddFormProps) {
     );
   }
 
-  const currentTemplate = TEMPLATES.find((t) => t.id === template)!;
+  const currentTemplate = template;
+  const fieldNames = [...currentTemplate.fields.map(fieldName), ...customKeys];
 
   // ── Field Form ──
   return (
@@ -143,7 +184,9 @@ export function QuickAddForm({ domain, onSave, onCancel }: QuickAddFormProps) {
         >
           ← Templates
         </button>
-        <span className="text-[10px] text-text-dim">{currentTemplate.icon} {currentTemplate.label}</span>
+        <span className="text-[10px] text-text-dim">
+          {ICONS[currentTemplate.icon] ?? "🔐"} {currentTemplate.name}
+        </span>
       </div>
 
       <div>
@@ -158,22 +201,24 @@ export function QuickAddForm({ domain, onSave, onCancel }: QuickAddFormProps) {
         />
       </div>
 
-      {currentTemplate.fields.map((fieldName) => (
-        <div key={fieldName}>
-          <label className={labelClass}>{fieldName}</label>
+      {fieldNames.map((name, index) => (
+        <div key={name}>
+          <label className={labelClass}>
+            {currentTemplate.fields[index]?.label ?? name}
+          </label>
           <div className="flex gap-1.5">
             <input
-              type="text"
-              value={fields[fieldName] || ""}
-              onChange={(e) => updateField(fieldName, e.target.value)}
-              placeholder={fieldName}
+              type={wantsGenerator(name) ? "password" : "text"}
+              value={fields[name] || ""}
+              onChange={(e) => updateField(name, e.target.value)}
+              placeholder={currentTemplate.fields[index]?.placeholder ?? name}
               className={inputClass}
             />
-            {(fieldName === "Password" || fieldName === "Secret") && (
+            {wantsGenerator(name) && (
               <>
                 <button
                   type="button"
-                  onClick={() => updateField(fieldName, runGenerator(genOpts))}
+                  onClick={() => updateField(name, runGenerator(genOpts))}
                   className="shrink-0 rounded-md bg-accent/10 border border-accent/30 px-2 py-1.5 text-[10px] font-medium text-accent hover:bg-accent/20 transition-colors"
                   title="Generate with current options"
                 >
@@ -181,33 +226,38 @@ export function QuickAddForm({ domain, onSave, onCancel }: QuickAddFormProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setGenOpen(genOpen === fieldName ? null : fieldName)}
+                  onClick={() => setGenOpen(genOpen === name ? null : name)}
                   className="shrink-0 rounded-md border border-border px-2 py-1.5 text-[10px] font-medium text-text-muted hover:text-accent hover:bg-accent/5 transition-colors"
                   title="Generator options"
                   aria-label="Generator options"
                 >
-                  {genOpen === fieldName ? "▴" : "▾"}
+                  {genOpen === name ? "▴" : "▾"}
                 </button>
               </>
             )}
           </div>
-          {genOpen === fieldName && (
+          {genOpen === name && (
             <InlineGenerator
               opts={genOpts}
               onChange={setGenOpts}
-              onInsert={(val) => updateField(fieldName, val)}
+              onInsert={(val) => updateField(name, val)}
             />
+          )}
+          {currentTemplate.fields[index]?.hint && !(fields[name] || "").trim() && (
+            <p className="mt-0.5 text-[10px] leading-snug text-text-dim">
+              {currentTemplate.fields[index]?.hint}
+            </p>
           )}
         </div>
       ))}
 
       {/* Custom: add more fields */}
-      {template === "custom" && (
+      {template.id === "custom" && (
         <button
           type="button"
           onClick={() => {
-            const n = Object.keys(fields).length + 1;
-            updateField(`Field ${n}`, "");
+            const n = fieldNames.length + 1;
+            setCustomKeys([...customKeys, `Field ${n}`]);
           }}
           className="text-[10px] text-accent hover:underline"
         >
@@ -244,7 +294,8 @@ function InlineGenerator({
   onChange: (next: GenOpts) => void;
   onInsert: (value: string) => void;
 }) {
-  const set = <K extends keyof GenOpts>(k: K, v: GenOpts[K]) => onChange({ ...opts, [k]: v });
+  const set = <K extends keyof GenOpts>(k: K, v: GenOpts[K]) =>
+    onChange({ ...opts, [k]: v });
   return (
     <div className="mt-1.5 rounded-md border border-border bg-surface-raised/60 p-2 space-y-1.5">
       <div className="flex gap-1 rounded-md border border-border overflow-hidden text-[10px]">
@@ -253,7 +304,9 @@ function InlineGenerator({
             key={m}
             type="button"
             className={`flex-1 py-1 font-medium transition-colors ${
-              opts.mode === m ? "bg-accent/15 text-accent" : "text-text-muted hover:bg-surface-raised"
+              opts.mode === m
+                ? "bg-accent/15 text-accent"
+                : "text-text-muted hover:bg-surface-raised"
             }`}
             onClick={() => set("mode", m)}
           >
@@ -276,10 +329,22 @@ function InlineGenerator({
             />
           </div>
           <div className="flex flex-wrap gap-2 text-[10px] text-text-secondary">
-            <Mini label="A-Z" checked={opts.uppercase} onChange={(v) => set("uppercase", v)} />
-            <Mini label="a-z" checked={opts.lowercase} onChange={(v) => set("lowercase", v)} />
+            <Mini
+              label="A-Z"
+              checked={opts.uppercase}
+              onChange={(v) => set("uppercase", v)}
+            />
+            <Mini
+              label="a-z"
+              checked={opts.lowercase}
+              onChange={(v) => set("lowercase", v)}
+            />
             <Mini label="0-9" checked={opts.digits} onChange={(v) => set("digits", v)} />
-            <Mini label="@#!" checked={opts.symbols} onChange={(v) => set("symbols", v)} />
+            <Mini
+              label="@#!"
+              checked={opts.symbols}
+              onChange={(v) => set("symbols", v)}
+            />
           </div>
           <Mini
             label="Exclude ambiguous (0O, 1lI)"
@@ -287,7 +352,7 @@ function InlineGenerator({
             onChange={(v) => set("excludeAmbiguous", v)}
           />
           <Mini
-            label={'Exclude problematic (\\\'"{}<>)'}
+            label={"Exclude problematic (\\'\"{}<>)"}
             checked={opts.excludeProblematic}
             onChange={(v) => set("excludeProblematic", v)}
           />
@@ -321,8 +386,16 @@ function InlineGenerator({
             </select>
           </div>
           <div className="flex flex-wrap gap-2 text-[10px] text-text-secondary">
-            <Mini label="Capitalize" checked={opts.capitalize} onChange={(v) => set("capitalize", v)} />
-            <Mini label="+ number" checked={opts.includeNumber} onChange={(v) => set("includeNumber", v)} />
+            <Mini
+              label="Capitalize"
+              checked={opts.capitalize}
+              onChange={(v) => set("capitalize", v)}
+            />
+            <Mini
+              label="+ number"
+              checked={opts.includeNumber}
+              onChange={(v) => set("includeNumber", v)}
+            />
           </div>
         </>
       )}

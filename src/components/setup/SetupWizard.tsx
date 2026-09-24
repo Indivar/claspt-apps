@@ -36,10 +36,37 @@ export const SETUP_VERSION = 1;
 
 type StepId = "welcome" | "recovery" | "purpose" | "passwords" | "assistant" | "done";
 
+/** What each step is called in the progress list on the left. */
+const STEP_LABELS: Record<StepId, string> = {
+  welcome: "Welcome",
+  recovery: "Recovery key",
+  purpose: "What it is for",
+  passwords: "Passwords",
+  assistant: "AI tools",
+  done: "Finish",
+};
+
 export function SetupWizard({ onFinish }: { onFinish: () => void }) {
   const recoveryKey = useVaultStore((s) => s.recoveryKey);
   const [index, setIndex] = useState(0);
   const [chosen, setChosen] = useState<UseCaseId[]>(["passwords", "notes"]);
+  /**
+   * Whether the key was acknowledged on its step, which is what decides if it
+   * may be dropped at the end.
+   *
+   * Not "was the step shown": someone who skips from the welcome screen never
+   * sees the key, and for them the modal that follows is the only copy they
+   * will ever get. Clearing it in that case would lose it silently.
+   */
+  const [recoveryAcknowledged, setRecoveryAcknowledged] = useState(false);
+  /**
+   * Snapshotted at mount so the step list cannot change under the user.
+   *
+   * The list used to read `recoveryKey` live, so clearing it mid-run would
+   * drop a step and renumber everything after it — Continue would land two
+   * screens further on than intended.
+   */
+  const [showsRecovery] = useState(() => Boolean(useVaultStore.getState().recoveryKey));
 
   // Someone who reruns this from Settings has no recovery key to show — it only
   // exists at creation — so that step is left out rather than shown empty.
@@ -49,12 +76,12 @@ export function SetupWizard({ onFinish }: { onFinish: () => void }) {
       .filter((s): s is "passwords" | "assistant" => Boolean(s));
     return [
       "welcome",
-      ...(recoveryKey ? (["recovery"] as StepId[]) : []),
+      ...(showsRecovery ? (["recovery"] as StepId[]) : []),
       "purpose",
       ...optional,
       "done",
     ];
-  }, [chosen, recoveryKey]);
+  }, [chosen, showsRecovery]);
 
   const current = steps[Math.min(index, steps.length - 1)] ?? "done";
 
@@ -74,17 +101,29 @@ export function SetupWizard({ onFinish }: { onFinish: () => void }) {
         // Not fatal — at worst the walkthrough runs once more. Finishing must
         // never be blocked on recording that it finished.
       }
+      // Drop the key from memory once its step has been acknowledged. It was
+      // left in the store, and the modal that exists for vaults created before
+      // this walkthrough then appeared the moment the walkthrough ended —
+      // asking a second time for something already done, and looking like the
+      // first save had not worked.
+      if (recoveryAcknowledged) useVaultStore.getState().clearRecoveryKey();
+
       onFinish();
       if (startTour) useUIStore.getState().startTour("quick");
     },
-    [onFinish],
+    [onFinish, recoveryAcknowledged],
   );
 
   const next = useCallback(() => setIndex((i) => i + 1), []);
   const back = useCallback(() => setIndex((i) => Math.max(0, i - 1)), []);
 
-  // The progress dots count only the steps this person will actually see.
-  const frame = { stepNumber: index + 1, stepCount: steps.length };
+  // The progress list covers only the steps this person will actually see, so
+  // someone who wants notes and nothing else is not shown four they will skip.
+  const frame = {
+    stepNumber: index + 1,
+    stepCount: steps.length,
+    stepLabels: steps.map((id) => STEP_LABELS[id]),
+  };
 
   switch (current) {
     case "welcome":
@@ -96,7 +135,14 @@ export function SetupWizard({ onFinish }: { onFinish: () => void }) {
     case "recovery":
       return (
         <WizardFrame {...frame}>
-          <RecoveryKeyStep recoveryKey={recoveryKey ?? ""} onNext={next} onBack={back} />
+          <RecoveryKeyStep
+            recoveryKey={recoveryKey ?? ""}
+            onNext={() => {
+              setRecoveryAcknowledged(true);
+              next();
+            }}
+            onBack={back}
+          />
         </WizardFrame>
       );
     case "purpose":

@@ -73,7 +73,7 @@ pub fn list_tags_usage(vault_dir: &Path) -> Result<Vec<TagUsage>, PageError> {
         })
         .collect();
 
-    result.sort_by(|a, b| b.count.cmp(&a.count));
+    result.sort_by_key(|t| std::cmp::Reverse(t.count));
     Ok(result)
 }
 

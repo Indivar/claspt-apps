@@ -1,6 +1,6 @@
 # Claspt Local API Reference
 
-The Claspt desktop app exposes a local HTTP API on `127.0.0.1` for use by the browser extension, the bundled MCP server, and external automation. The same operation vocabulary is mirrored on mobile via local TypeScript functions, and shapes are defined in `shared/src/types.ts` so all clients consume one contract.
+The Claspt desktop app exposes a local HTTP API on `127.0.0.1` for use by the browser extension, the bundled MCP server, and external automation. Shapes are defined in `shared/src/types.ts` so all clients consume one contract.
 
 - **Base URL:** `http://127.0.0.1:{port}` (default port `9315`, configurable in Settings → Integrations → Local API)
 - **Authentication:** `Authorization: Bearer <token>` header on every request
@@ -17,12 +17,9 @@ Claspt has three API surfaces. Knowing which one you're calling matters because 
 | Surface | Transport | Consumers | Treats vault as | Concurrency |
 |---------|-----------|-----------|-----------------|-------------|
 | **Desktop local API** (this doc) | Loopback HTTP | Browser extension, MCP, automation scripts on the same machine | Decrypted, structured (pages + secret blocks) | Last-write-wins or `If-Match` ETag |
-| **Cloud sync API** (`/api/v2/...`) | TLS HTTPS to user's `server_url` | Mobile, desktop sync engine | Opaque encrypted blobs | Sync versioning (manifest, ack) |
-| **Mobile native module** (`mobile/src/native/*.ts`) | In-process TypeScript over Expo FileSystem | Mobile app UI | Decrypted, structured (same shapes as local API) | Sync conflict resolution after the fact |
+| **Cloud sync API** (`/api/v2/...`) | TLS HTTPS to user's `server_url` | desktop sync engine | Opaque encrypted blobs | Sync versioning (manifest, ack) |
 
-**The CRUD operations defined in this document have an exact mobile-side counterpart** in `mobile/src/native/pages.ts` (and `mobile/src/native/secret.ts`). Same names, same parameters, same return shapes — different implementation. The cross-reference table is at the end of each operation.
-
-The cloud sync API doesn't expose CRUD primitives because mobile and desktop edit their local vaults and let the sync engine reconcile.
+The cloud sync API doesn't expose CRUD primitives because each device edits its local vault and let the sync engine reconcile.
 
 ---
 
@@ -42,7 +39,6 @@ The cloud sync API doesn't expose CRUD primitives because mobile and desktop edi
   - [Password generator](#password-generator)
   - [Agent memory](#agent-memory)
 - [Approval flow (Secrets scope)](#approval-flow-secrets-scope)
-- [Mobile parity table](#mobile-parity-table)
 - [Changelog](#changelog)
 
 ---
@@ -107,22 +103,20 @@ Endpoints accept both via `{*path_or_id}`. The server detects the format:
 - Looks like a UUID → treat as ID, look up the page
 - Otherwise → treat as path
 
-Mobile follows the same convention via `pagesNative.lookup(idOrPath)`.
-
 ---
 
 ## Concurrency
 
 Edit operations (`PUT`, `PATCH`, `DELETE`) accept an optional `If-Match` header carrying the value of the `ETag` returned by the most recent `GET` of that page.
 
-The ETag is the page's `meta.updated_at` timestamp serialized as RFC 3339 milliseconds (e.g. `"2026-04-26T18:30:42.123Z"`). Using the timestamp instead of file-SHA means clients on different machines (desktop, mobile after sync) can compare ETags without needing identical file bytes.
+The ETag is the page's `meta.updated_at` timestamp serialized as RFC 3339 milliseconds (e.g. `"2026-04-26T18:30:42.123Z"`). Using the timestamp instead of file-SHA means clients on different machines (after sync) can compare ETags without needing identical file bytes.
 
 | Mode | Behavior |
 |------|----------|
 | **Without `If-Match`** | Last-write-wins. Suitable when you accept that you may overwrite concurrent changes. |
 | **With `If-Match`** | Server returns `412 PRECONDITION_FAILED` if vault has changed. Client should re-fetch and retry — the **desktop always wins** on conflict. |
 
-The browser extension uses `If-Match` for every PATCH/DELETE and reverts its optimistic UI update on `412`. Mobile doesn't use `If-Match` because mobile edits are local and sync conflicts are resolved post-hoc by the sync engine.
+The browser extension uses `If-Match` for every PATCH/DELETE and reverts its optimistic UI update on `412`.
 
 ETag is returned in:
 - `ETag` response header on `GET /api/pages/{path_or_id}`
@@ -187,8 +181,6 @@ Returns server health, app version, vault state, license tier, and a feature-det
 | `plan` | string \| null | License tier: `"Free"`, `"Trial"`, `"Pro"`, `"Pro+"`, or `null` if expired |
 | `features` | object | Capability map — feature-detect rather than version-compare |
 
-Mobile parity: `vault.getStatus()` returns the same shape minus `plan` (mobile uses cloud-side license check).
-
 ---
 
 ### Pages
@@ -215,8 +207,6 @@ List pages, optionally filtered, paginated.
 
 `next_cursor: null` means no more pages.
 
-Mobile parity: `pagesNative.list({folder?, tag?, limit?, cursor?})` returns identical shape.
-
 ---
 
 #### `POST /api/pages`
@@ -237,8 +227,6 @@ Create a new page.
 
 **Response 201:** the created `Page` (with content). `ETag` header set.
 
-Mobile parity: `pagesNative.create({title, folder?, content?, tags?})`.
-
 ---
 
 #### `GET /api/pages/{*path_or_id}`
@@ -246,8 +234,6 @@ Mobile parity: `pagesNative.create({title, folder?, content?, tags?})`.
 Read a page by path or ID. Notes scope returns the page with secret block values redacted.
 
 **Response 200:** `Page` with `content` populated. `ETag` header set.
-
-Mobile parity: `pagesNative.read(idOrPath)`.
 
 ---
 
@@ -265,8 +251,6 @@ Replace the entire page content. **Destructive** — for granular edits use the 
 
 **Response 200:** updated `Page`. `ETag` header set to new value.
 
-Mobile parity: `pagesNative.update(idOrPath, content)`.
-
 ---
 
 #### `DELETE /api/pages/{*path_or_id}`
@@ -277,8 +261,6 @@ Delete a page entirely.
 - `If-Match: <etag>` (optional)
 
 **Response 204** on success.
-
-Mobile parity: `pagesNative.delete(idOrPath)`.
 
 ---
 
@@ -318,8 +300,6 @@ Merge fields into the secret block whose label matches `label`. Fields not in th
 
 **Errors:** `403 SCOPE_INSUFFICIENT` (Notes), `404 BLOCK_NOT_FOUND` (no `upsert`), `412 PRECONDITION_FAILED`.
 
-Mobile parity: `secretNative.patchBlock(idOrPath, {label, fields, delete_fields?, upsert?})`.
-
 ---
 
 #### `DELETE /api/pages/{*path_or_id}/secret`
@@ -337,8 +317,6 @@ Remove a single secret block. If `delete_page_if_empty: true` and the block was 
 - `200` with the updated `Page` if the page survives
 - `204` (no body) if the page was deleted
 
-Mobile parity: `secretNative.deleteBlock(idOrPath, {label, delete_page_if_empty?})`.
-
 ---
 
 #### `PATCH /api/pages/{*path_or_id}/secret/rename`
@@ -354,8 +332,6 @@ Change a secret block's label without altering its fields.
 
 **Errors:** `404 BLOCK_NOT_FOUND`, `409 LABEL_CONFLICT` (target label already used on this page).
 
-Mobile parity: `secretNative.renameBlock(idOrPath, {old_label, new_label})`.
-
 ---
 
 #### `GET /api/pages/{*path_or_id}/secret`
@@ -370,8 +346,6 @@ List all secret blocks in a page (Notes scope: labels only; Secrets scope: label
 ```
 
 Notes scope returns `fields: { redacted: true }` instead of values.
-
-Mobile parity: `secretNative.listBlocks(idOrPath)`.
 
 ---
 
@@ -390,8 +364,6 @@ Move a page to a different folder. The page's path changes; clients holding the 
 
 **Errors:** `400 INVALID_PATH`, `404 NOT_FOUND`.
 
-Mobile parity: `pagesNative.move(idOrPath, folder)`.
-
 ---
 
 #### `PATCH /api/pages/{*path_or_id}/title`
@@ -404,8 +376,6 @@ Change a page's title (also updates filename slug if the title is structural).
 ```
 
 **Response 200:** updated `Page` with the new `path` and `meta.title`.
-
-Mobile parity: `pagesNative.updateTitle(idOrPath, title)`.
 
 ---
 
@@ -420,8 +390,6 @@ Replace a page's tags.
 
 **Response 200:** updated `Page`.
 
-Mobile parity: `pagesNative.updateTags(idOrPath, tags)`.
-
 ---
 
 #### `PATCH /api/pages/{*path_or_id}/pin`
@@ -435,8 +403,6 @@ Toggle the page's pinned state.
 
 **Response 200:** updated `Page`.
 
-Mobile parity: `pagesNative.togglePin(idOrPath)` (no body — toggles current state).
-
 ---
 
 #### `PATCH /api/pages/{*path_or_id}/archive`
@@ -449,8 +415,6 @@ Toggle the page's archived state.
 ```
 
 **Response 200:** updated `Page`.
-
-Mobile parity: `pagesNative.toggleArchive(idOrPath)`.
 
 ---
 
@@ -486,8 +450,6 @@ Full-text search across the vault.
 
 Search results never include secret block values.
 
-Mobile parity: `searchNative.search({q, scope?, limit?})`.
-
 ---
 
 ### Folders
@@ -500,8 +462,6 @@ List all folders in the vault.
 ```json
 { "items": ["credentials", "credentials/work", "general", "identities"] }
 ```
-
-Mobile parity: `foldersNative.list()`.
 
 ---
 
@@ -519,8 +479,6 @@ Create a new folder.
 { "name": "credentials/team" }
 ```
 
-Mobile parity: `foldersNative.create(name)`.
-
 ---
 
 #### `PATCH /api/folders/{*name}`
@@ -537,8 +495,6 @@ Rename a folder. All pages under it are moved.
 { "old_name": "credentials/team", "new_name": "credentials/team-renamed", "moved_pages": 12 }
 ```
 
-Mobile parity: `foldersNative.rename(name, newName)`.
-
 ---
 
 #### `DELETE /api/folders/{*name}?action={delete|move}&move_to={folder}`
@@ -546,8 +502,6 @@ Mobile parity: `foldersNative.rename(name, newName)`.
 Delete a folder. With `action=move`, pages in the folder are moved to `move_to`. With `action=delete`, pages are deleted with the folder.
 
 **Response 204** on success.
-
-Mobile parity: `foldersNative.remove(name, {action, move_to?})`.
 
 ---
 
@@ -617,8 +571,6 @@ Generate up to 100 values of the same type in one request.
 
 **Response 200:** `{ "items": ["…", "…", …] }`.
 
-Mobile parity: `generatorNative.password(opts)` etc. — same shapes.
-
 ---
 
 ### Agent memory
@@ -677,42 +629,9 @@ This is the model used by the bundled MCP server and by external "Secrets Only" 
 
 ---
 
-## Mobile parity table
-
-Every CRUD operation in this API has an equivalent mobile native function. Same names, same params, same return shapes. The implementation differs (Rust on desktop, TypeScript over Expo FileSystem on mobile) but the contract is shared via `shared/src/types.ts`.
-
-| Desktop endpoint | Mobile function | Notes |
-|------------------|------------------|-------|
-| `GET /api/status` | `vault.getStatus()` | mobile omits `plan` |
-| `GET /api/pages` | `pagesNative.list({folder?, tag?, limit?, cursor?})` | |
-| `POST /api/pages` | `pagesNative.create({title, folder?, content?, tags?})` | |
-| `GET /api/pages/{idOrPath}` | `pagesNative.read(idOrPath)` | |
-| `PUT /api/pages/{idOrPath}` | `pagesNative.update(idOrPath, content)` | |
-| `DELETE /api/pages/{idOrPath}` | `pagesNative.delete(idOrPath)` | |
-| `PATCH /api/pages/{idOrPath}/secret` | `secretNative.patchBlock(idOrPath, body)` | **NEW in 2.0.0** |
-| `DELETE /api/pages/{idOrPath}/secret` | `secretNative.deleteBlock(idOrPath, body)` | **NEW in 2.0.0** |
-| `PATCH /api/pages/{idOrPath}/secret/rename` | `secretNative.renameBlock(idOrPath, body)` | **NEW in 2.0.0** |
-| `GET /api/pages/{idOrPath}/secret` | `secretNative.listBlocks(idOrPath)` | **NEW in 2.0.0** |
-| `PATCH /api/pages/{idOrPath}/move` | `pagesNative.move(idOrPath, folder)` | exists, was inconsistent — standardized in 2.0.0 |
-| `PATCH /api/pages/{idOrPath}/title` | `pagesNative.updateTitle(idOrPath, title)` | exists, standardized |
-| `PATCH /api/pages/{idOrPath}/tags` | `pagesNative.updateTags(idOrPath, tags)` | exists, standardized |
-| `PATCH /api/pages/{idOrPath}/pin` | `pagesNative.togglePin(idOrPath)` | exists, standardized |
-| `PATCH /api/pages/{idOrPath}/archive` | `pagesNative.toggleArchive(idOrPath)` | exists, standardized |
-| `GET /api/search` | `searchNative.search({q, scope?, limit?})` | |
-| `GET /api/folders` | `foldersNative.list()` | |
-| `POST /api/folders` | `foldersNative.create(name)` | |
-| `PATCH /api/folders/{name}` | `foldersNative.rename(name, newName)` | **NEW in 2.0.0** |
-| `DELETE /api/folders/{name}` | `foldersNative.remove(name, {action, move_to?})` | exists, standardized |
-| `POST /api/generate/{kind}` | `generatorNative.{kind}(opts)` | |
-| `GET /api/memory*` | `memoryNative.*` | future — mobile doesn't currently expose these |
-
-When making changes to either side, the contract in `shared/src/types.ts` is the source of truth. Both implementations must conform.
-
----
-
 ## Changelog
 
-### 2.0.0 (planned, paired with browser extension 2.0.0 + mobile 2.0.0)
+### 2.0.0 (planned, paired with browser extension 2.0.0)
 
 **New endpoints:**
 - `PATCH /api/pages/{*path_or_id}/secret` — non-destructive merge of fields into a named secret block
@@ -736,8 +655,6 @@ When making changes to either side, the contract in `shared/src/types.ts` is the
 - ETag is `meta.updated_at` ISO timestamp (was: not present)
 - `X-Claspt-Source` request header for attribution in auto-commit messages
 
-**Mobile parity:**
-- Mobile native module (`mobile/src/native/pages.ts`, `secret.ts`, `folders.ts`) gains the same vocabulary
 - `shared/src/types.ts` extended with `SecretBlockPatch`, `SecretBlockDelete`, etc.
 
 ### 1.x
@@ -759,8 +676,5 @@ When making changes to either side, the contract in `shared/src/types.ts` is the
 | Desktop secret-block parser | `src-tauri/src/pages/secret.rs` |
 | Desktop page CRUD | `src-tauri/src/pages/crud.rs` |
 | Desktop page model | `src-tauri/src/pages/model.rs` |
-| Mobile pages | `mobile/src/native/pages.ts` |
-| Mobile secret blocks | `mobile/src/native/secret.ts` (NEW in 2.0.0) |
-| Mobile folders | `mobile/src/native/folders.ts` |
 | Browser extension API client | `browser-extension/src/background/api-client.ts` |
 | Shared types | `shared/src/types.ts` |

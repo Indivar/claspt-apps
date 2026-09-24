@@ -14,6 +14,8 @@ const statusConfig: Record<ConnectionState, { label: string; color: string }> = 
   vault_locked: { label: "Vault Locked", color: "#eab308" },
   disconnected: { label: "Disconnected", color: "#ef4444" },
   permission_needed: { label: "Permission needed", color: "#3b82f6" },
+  desktop_too_old: { label: "Update the desktop app", color: "#eab308" },
+  unauthorized: { label: "Key refused, pair again", color: "#eab308" },
 };
 
 export function ConnectionStatus({ state, version }: Props) {

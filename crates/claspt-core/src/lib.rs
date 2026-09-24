@@ -28,8 +28,13 @@
 //!   guards on-disk secrets. Because the salt is bound to `vault_id`, two vaults
 //!   with the same password still get different group keys.
 //!
-//! All key material is held in `zeroize::Zeroizing` wrappers so it is scrubbed from
-//! memory on drop.
+//! Inside this crate every key and password is held in a `zeroize::Zeroizing`
+//! wrapper and scrubbed on drop. The one place that is not true is the FFI
+//! boundary: UniFFI returns byte vectors and strings by copying them into a
+//! buffer the foreign side owns and frees, and that copy is not scrubbed. The
+//! mobile app therefore holds the master key it receives and zeroes it itself
+//! on lock; see `mobile/src/native/vault.ts`. Passwords arriving over the FFI
+//! are wrapped on entry so at least the Rust-side copy is scrubbed.
 //!
 //! # What is and isn't encrypted
 //!
@@ -214,6 +219,17 @@ pub struct ApplyResult {
     /// Human-readable descriptions of why a fast-forward was refused; empty on a
     /// clean apply.
     pub conflicts: Vec<String>,
+    /// Pages that changed on both sides and had to be chosen between.
+    pub resolved: Vec<ResolvedPage>,
+}
+
+/// One choice a merge made; see `sync::bundle::ResolvedPage`.
+pub struct ResolvedPage {
+    pub path: String,
+    pub title: String,
+    pub mine_lost: bool,
+    pub kept_updated_at: String,
+    pub lost_updated_at: String,
 }
 
 /// Result of an auto-commit.
@@ -251,6 +267,7 @@ pub struct GitCommitDiff {
 // --- FFI wrapper functions ---
 
 use std::path::Path;
+use zeroize::Zeroizing;
 
 /// Encrypt a single secret block value under `master_key`, returning an
 /// `enc:v1:`-less base64 string (`nonce ‖ ciphertext ‖ tag`). `master_key` must be
@@ -275,15 +292,17 @@ fn generate_master_key() -> Result<Vec<u8>, CoreError> {
 
 /// Stretch `password` with `salt` via Argon2id into a 32-byte key. `salt` should be
 /// at least 16 bytes; the same `(password, salt)` always yields the same key.
-fn derive_key(password: &[u8], salt: &[u8]) -> Result<Vec<u8>, CoreError> {
-    let key = crypto::kdf::derive_key(password, salt)?;
+fn derive_key(password: Vec<u8>, salt: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let password = Zeroizing::new(password);
+    let key = crypto::kdf::derive_key(&password, salt)?;
     Ok(key.to_vec())
 }
 
 /// Derive the 32-byte sync group key for `(password, vault_id)`. Deterministic and
 /// distinct from the master key; used only for sync-bundle encryption.
-fn derive_group_key(password: &[u8], vault_id: String) -> Result<Vec<u8>, CoreError> {
-    let key = crypto::group_key::derive_group_key(password, &vault_id)?;
+fn derive_group_key(password: Vec<u8>, vault_id: String) -> Result<Vec<u8>, CoreError> {
+    let password = Zeroizing::new(password);
+    let key = crypto::group_key::derive_group_key(&password, &vault_id)?;
     Ok(key.to_vec())
 }
 
@@ -291,6 +310,7 @@ fn derive_group_key(password: &[u8], vault_id: String) -> Result<Vec<u8>, CoreEr
 /// the `vault.key` file at `vault_key_path` (0o600 on Unix). Returns the plaintext
 /// master key. The parent directory must already exist.
 fn create_vault_key(password: String, vault_key_path: String) -> Result<Vec<u8>, CoreError> {
+    let password = Zeroizing::new(password);
     let key = crypto::vault_key::create_vault_key(password.as_bytes(), Path::new(&vault_key_path))?;
     Ok(key.to_vec())
 }
@@ -298,6 +318,7 @@ fn create_vault_key(password: String, vault_key_path: String) -> Result<Vec<u8>,
 /// Read `vault.key` at `vault_key_path` and unwrap the master key using `password`.
 /// A wrong password surfaces as `CoreError::CryptoError`.
 fn unlock_vault_key(password: String, vault_key_path: String) -> Result<Vec<u8>, CoreError> {
+    let password = Zeroizing::new(password);
     let key = crypto::vault_key::unlock_vault_key(password.as_bytes(), Path::new(&vault_key_path))?;
     Ok(key.to_vec())
 }
@@ -311,6 +332,8 @@ fn change_vault_password(
     new_password: String,
     vault_key_path: String,
 ) -> Result<(), CoreError> {
+    let old_password = Zeroizing::new(old_password);
+    let new_password = Zeroizing::new(new_password);
     crypto::vault_key::change_password(
         old_password.as_bytes(),
         new_password.as_bytes(),
@@ -330,6 +353,8 @@ fn recover_vault_key(
     vault_key_path: String,
     verify_hash: Option<String>,
 ) -> Result<Vec<u8>, CoreError> {
+    let recovery_key_b64 = Zeroizing::new(recovery_key_b64);
+    let new_password = Zeroizing::new(new_password);
     let key = crypto::vault_key::recover_with_key(
         &recovery_key_b64,
         new_password.as_bytes(),
@@ -339,11 +364,92 @@ fn recover_vault_key(
     Ok(key.to_vec())
 }
 
+/// Whether `bytes` are a sealed attachment (see `crypto::attachment`).
+fn is_sealed_attachment(bytes: &[u8]) -> bool {
+    crypto::attachment::is_sealed(bytes)
+}
+
+/// Seal attachment `plaintext` under `master_key`; the result starts with the
+/// sealed-attachment magic and keeps no plaintext.
+fn seal_attachment(master_key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
+    Ok(crypto::attachment::seal(master_key, plaintext)?)
+}
+
+/// Open a sealed attachment under `master_key`, returning the original bytes.
+/// Throws CryptoError on a wrong key, a tampered file, or a file that is not sealed.
+fn open_attachment(master_key: &[u8], sealed: &[u8]) -> Result<Vec<u8>, CoreError> {
+    Ok(crypto::attachment::open(master_key, sealed)?)
+}
+
 /// Compute the recovery-verification hash for a master key (hex SHA-256, 64 chars).
 /// Store this in `config.json` at vault creation so [`recover_vault_key`] can reject
 /// wrong recovery keys.
 fn compute_master_key_verify(master_key: &[u8]) -> String {
     crypto::vault_key::compute_master_key_verify(master_key)
+}
+
+/// Wrap `key` under `kek`; see `crypto::key_wrap`.
+fn wrap_key(kek: &[u8], key: &[u8]) -> Result<Vec<u8>, CoreError> {
+    Ok(crypto::key_wrap::wrap(kek, key)?)
+}
+
+/// Unwrap a key wrapped by `wrap_key`.
+fn unwrap_key(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CoreError> {
+    Ok(crypto::key_wrap::unwrap(kek, wrapped)?.to_vec())
+}
+
+/// Write a known master key wrapped by `password` as a `vault.key` file:
+/// how a restored device installs the vault's real master key.
+fn write_vault_key(password: &[u8], master_key: &[u8], path: String) -> Result<(), CoreError> {
+    let password = Zeroizing::new(password.to_vec());
+    Ok(crypto::vault_key::write_key_file(
+        &password,
+        master_key,
+        Path::new(&path),
+    )?)
+}
+
+/// A fresh device signing key as PKCS#8 bytes; see `crypto::device_key`.
+fn generate_device_key() -> Result<Vec<u8>, CoreError> {
+    Ok(crypto::device_key::generate()?.to_vec())
+}
+
+/// The public half the server keeps.
+fn device_public_key(pkcs8: &[u8]) -> Result<Vec<u8>, CoreError> {
+    Ok(crypto::device_key::public_key(pkcs8)?)
+}
+
+/// Sign a request message with the device key.
+fn sign_with_device_key(pkcs8: &[u8], message: &[u8]) -> Result<Vec<u8>, CoreError> {
+    Ok(crypto::device_key::sign(pkcs8, message)?)
+}
+
+/// The licence-keyed HMAC clients used before device keys, still needed for
+/// the register and verify calls made before the server knows the key.
+fn licence_hmac(license_token: &[u8], message: &[u8]) -> Vec<u8> {
+    crypto::device_key::licence_hmac(license_token, message)
+}
+
+/// The RFC 6238 code for `secret_base32` at `now_secs`. `algorithm` is the
+/// `otpauth://` name (`SHA1`, `SHA256`, `SHA512`; empty means SHA1). The seed
+/// never leaves Rust in decoded form: the app hands over the base32 text it
+/// stores and gets six to eight digits back.
+fn totp_code(
+    secret_base32: String,
+    algorithm: String,
+    digits: u32,
+    period: u32,
+    now_secs: u64,
+) -> Result<String, CoreError> {
+    let secret_base32 = Zeroizing::new(secret_base32);
+    let algorithm = crypto::totp::Algorithm::parse(&algorithm)?;
+    Ok(crypto::totp::totp(
+        &secret_base32,
+        algorithm,
+        digits,
+        period,
+        now_secs,
+    )?)
 }
 
 /// Encrypt a git bundle for sync transport under the 32-byte `group_key`. The
@@ -390,6 +496,17 @@ fn apply_git_bundle(vault_dir: String, bundle_data: &[u8]) -> Result<ApplyResult
         commits_applied: result.commits_applied,
         needs_merge: result.needs_merge,
         conflicts: result.conflicts,
+        resolved: result
+            .resolved
+            .into_iter()
+            .map(|r| ResolvedPage {
+                path: r.path,
+                title: r.title,
+                mine_lost: r.mine_lost,
+                kept_updated_at: r.kept_updated_at,
+                lost_updated_at: r.lost_updated_at,
+            })
+            .collect(),
     })
 }
 

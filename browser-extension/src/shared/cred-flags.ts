@@ -38,9 +38,9 @@ export function statusBucket(c: Credential): number {
  * would only repeat it on a second line.
  *
  * Most saved credentials are named after the account they hold
- * ("google - varinder@example.com"), and the picker used to print the label and
+ * ("google - alice@example.com"), and the picker used to print the label and
  * the username side by side on one line, both truncated to fit. That produced
- * rows like "google - varinder@in… · varinder@indi…", which identify nothing.
+ * rows like "google - alice@ex… · alice@exam…", which identify nothing.
  */
 export function labelShowsUsername(label: string, username: string): boolean {
   if (!username) return false;

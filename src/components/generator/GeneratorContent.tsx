@@ -27,13 +27,7 @@ import { GeneratedHistoryTab } from "./GeneratedHistoryTab";
 import { markGeneratedValueUsed } from "@/lib/generated-history";
 
 type Tab =
-  | "password"
-  | "passphrase"
-  | "memorable"
-  | "pin"
-  | "uuid"
-  | "strength"
-  | "history";
+  "password" | "passphrase" | "memorable" | "pin" | "uuid" | "strength" | "history";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "password", label: "Password" },
@@ -77,7 +71,10 @@ export function GeneratorContent() {
   return (
     <>
       <div className="modal-overlay fixed inset-0 z-[55] flex items-center justify-center bg-black/40 dark:bg-black/60">
-        <div className="generator-dialog modal-card flex h-[520px] w-[680px] overflow-hidden rounded-2xl border border-border bg-surface">
+        <div
+          data-tour="generator-dialog"
+          className="generator-dialog modal-card flex h-[520px] w-[680px] overflow-hidden rounded-2xl border border-border bg-surface"
+        >
           {/* Tab sidebar */}
           <div className="flex w-40 shrink-0 flex-col border-r border-border bg-surface-raised p-3">
             <h2 className="mb-4 text-[11px] font-semibold uppercase tracking-wider text-text-muted">

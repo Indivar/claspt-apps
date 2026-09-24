@@ -170,9 +170,6 @@ cd src-tauri && cargo test --lib
 
 # Frontend
 npx vitest
-
-# Server
-cargo test -p claspt-server
 ```
 
 ### Linting & Formatting
@@ -208,13 +205,12 @@ npx prettier --check src/          # Frontend format check
 |-------|----------------|
 | Desktop runtime | Tauri 2.x (Rust) |
 | Frontend | React 18 + TypeScript |
-| Mobile | React Native + Expo SDK 54 |
 | Editor | CodeMirror 6 |
 | Styling | Tailwind CSS 4 |
 | Encryption | AES-256-GCM via `ring`, Argon2id KDF |
-| Search | tantivy (desktop), SQLite FTS5 (mobile) |
+| Search | tantivy |
 | State | Zustand |
-| Git | `git2` (desktop), `isomorphic-git` (mobile) |
+| Git | `git2` |
 
 ## Project Structure
 
@@ -233,14 +229,11 @@ claspt/
 │       ├── pages/          #   Page parsing, secret blocks, frontmatter
 │       ├── search/         #   tantivy indexing and queries
 │       ├── git/            #   Auto-commit, version history
-│       ├── sync/           #   WebDAV, SFTP, cloud sync
 │       ├── local_api/      #   HTTP API server
 │       ├── mcp.rs          #   MCP server (JSON-RPC over stdio)
 │       ├── cli.rs          #   CLI subcommands
 │       └── inbox.rs        #   Inbox file watcher
-├── mobile/                 # React Native app (iOS + Android)
 ├── shared/                 # Shared types, constants, utilities
-├── server/                 # License & update server (Axum + SQLite)
 └── docs/                   # PRD, requirements, dev plan, specs
 ```
 

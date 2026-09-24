@@ -30,6 +30,10 @@ function deps(overrides: Partial<LoginJobDeps> = {}): LoginJobDeps {
   return {
     openTab: vi.fn(async () => 7),
     activeTab: vi.fn(async () => ({ id: 3, url: "https://active.example/login" })),
+    // Tab 7 is the one openTab made for github; tab 3 is the active one.
+    tabUrl: vi.fn(async (tabId: number) =>
+      tabId === 7 ? "https://github.com/login" : "https://active.example/login",
+    ),
     fill: vi.fn(async () => true),
     isExcluded: vi.fn(() => false),
     ...overrides,
@@ -49,7 +53,7 @@ describe("executeLoginJob", () => {
     expect(out).toEqual({ ok: true, message: "filled and submitted" });
   });
 
-  it("falls back to the credential's own url, then to the active tab", async () => {
+  it("falls back to the credential's own url, then to the active tab without submitting", async () => {
     const d = deps();
     await executeLoginJob(job(), d);
     expect(d.openTab).toHaveBeenCalledWith("https://github.com/login");
@@ -61,8 +65,36 @@ describe("executeLoginJob", () => {
     expect(d2.fill).toHaveBeenCalledWith(3, expect.anything(), false);
     expect(out.message).toBe("filled, not submitted");
     const d3 = deps({ activeTab: vi.fn(async () => null) });
-    const none = await executeLoginJob(bare, d3);
+    const none = await executeLoginJob({ ...bare, submit: false }, d3);
     expect(none.ok).toBe(false);
+  });
+
+  it("refuses to submit when no page is known for the credential", async () => {
+    const d = deps();
+    const bare = job();
+    delete bare.credential.url;
+    const out = await executeLoginJob(bare, d);
+    expect(out.ok).toBe(false);
+    expect(out.message).toContain("no url");
+    expect(d.activeTab).not.toHaveBeenCalled();
+    expect(d.fill).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the tab is no longer on the job's site by the time of the fill", async () => {
+    const moved = deps({ tabUrl: vi.fn(async () => "https://phish.example/login") });
+    const out = await executeLoginJob(job(), moved);
+    expect(out.ok).toBe(false);
+    expect(out.message).toContain("github.com");
+    expect(moved.fill).not.toHaveBeenCalled();
+
+    const gone = deps({ tabUrl: vi.fn(async () => null) });
+    expect((await executeLoginJob(job(), gone)).ok).toBe(false);
+    expect(gone.fill).not.toHaveBeenCalled();
+
+    // A redirect within the same site is the normal case and is allowed.
+    const same = deps({ tabUrl: vi.fn(async () => "https://accounts.github.com/session") });
+    expect((await executeLoginJob(job(), same)).ok).toBe(true);
+    expect(same.fill).toHaveBeenCalled();
   });
 
   it("refuses excluded hosts and bad urls without touching the browser", async () => {

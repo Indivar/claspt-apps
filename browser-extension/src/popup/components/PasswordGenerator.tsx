@@ -1,16 +1,8 @@
 // Copyright (c) 2025-2026 Indivar Software Solutions Limited, Auckland, New Zealand.
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
-import React, { useState, useCallback, useEffect } from "react";
-import {
-  generatePassword,
-  generatePassphrase,
-  generateMemorable,
-  generatePin,
-  generateUuid,
-  estimateStrength,
-  type StrengthResult,
-} from "@/shared/generator";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
+import {generatePassword, generatePassphrase, generateMemorable, generatePin, generateUuid, estimateStrength,  } from "@/shared/generator";
 import type { Message } from "@/shared/types";
 import { formatTimeAgo } from "@/shared/gen-history";
 import {
@@ -43,9 +35,10 @@ const CLEAR_UNUSED_OLDER_THAN_DAYS = 30;
 
 export function PasswordGenerator() {
   const [mode, setMode] = useState<Mode>("password");
-  const [result, setResult] = useState("");
-  const [strength, setStrength] = useState<StrengthResult | null>(null);
-  const [copied, setCopied] = useState(false);
+  /** Bumped by "Regenerate"; every option change produces a new value on its own. */
+  const [generation, setGeneration] = useState(0);
+  /** The value a "Copied" tick refers to; the tick shows only while that value is on screen. */
+  const [copiedFor, setCopiedFor] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<StoredGeneratedEntry[]>([]);
   const [copiedHistoryIdx, setCopiedHistoryIdx] = useState<number | null>(null);
@@ -74,8 +67,8 @@ export function PasswordGenerator() {
   const [pinLength, setPinLength] = useState(6);
 
   const [revealed, setRevealed] = useState<Set<number>>(new Set());
-  /** Where the value on screen was stored, so Copy marks it rather than re-saving. */
-  const [savedAt, setSavedAt] = useState<RecordedAt | null>(null);
+  /** Where a generated value was stored, so Copy marks it rather than re-saving. */
+  const [savedAt, setSavedAt] = useState<{ value: string; at: RecordedAt } | null>(null);
   const [clearing, setClearing] = useState(false);
 
   const refreshHistory = useCallback(() => {
@@ -100,37 +93,36 @@ export function PasswordGenerator() {
     );
   }, [refreshHistory]);
 
-  const generate = useCallback(() => {
-    let value: string;
+  const generate = useCallback(() => setGeneration((n) => n + 1), []);
+
+  // The value on screen is a function of the options and of how many times
+  // "Regenerate" was pressed. Deriving it, rather than writing it into state
+  // from an effect, means no render ever shows the previous value under the
+  // new options. `generation` is a dependency on purpose: a new draw under
+  // the same options is the whole point of the button.
+  const result = useMemo(() => {
+    void generation;
     switch (mode) {
       case "password":
-        value = generatePassword({ length, uppercase, lowercase, digits, symbols, excludeAmbiguous, excludeProblematic });
-        break;
+        return generatePassword({ length, uppercase, lowercase, digits, symbols, excludeAmbiguous, excludeProblematic });
       case "passphrase":
-        value = generatePassphrase({ wordCount, separator, capitalize, includeNumber });
-        break;
+        return generatePassphrase({ wordCount, separator, capitalize, includeNumber });
       case "memorable":
-        value = generateMemorable({
+        return generateMemorable({
           style: memStyle,
           syllableCount,
           wordCount: memWordCount,
         });
-        break;
       case "pin":
-        value = generatePin(pinLength);
-        break;
+        return generatePin(pinLength);
       case "uuid":
-        value = generateUuid();
-        break;
+        return generateUuid();
     }
-    const s = estimateStrength(value);
-    setResult(value);
-    setStrength(s);
-    setCopied(false);
-    setSavedAt(null);
-  }, [mode, length, uppercase, lowercase, digits, symbols, excludeAmbiguous, excludeProblematic, wordCount, separator, capitalize, includeNumber, memStyle, syllableCount, memWordCount, pinLength]);
-
-  useEffect(() => { generate(); }, [generate]);
+  }, [generation, mode, length, uppercase, lowercase, digits, symbols, excludeAmbiguous, excludeProblematic, wordCount, separator, capitalize, includeNumber, memStyle, syllableCount, memWordCount, pinLength]);
+  const strength = useMemo(() => (result ? estimateStrength(result) : null), [result]);
+  const copied = copiedFor === result;
+  /** Where the value on screen was stored, if it has been stored yet. */
+  const savedAtForResult = savedAt?.value === result ? savedAt.at : null;
 
   /**
    * Keep every generated value in the vault, a moment after it stops changing.
@@ -146,7 +138,7 @@ export function PasswordGenerator() {
     const value = result;
     const timer = setTimeout(() => {
       void recordGeneratedPassword(value, "").then((at) => {
-        setSavedAt((current) => (value === result ? at : current));
+        if (at) setSavedAt({ value, at });
         refreshHistory();
       });
     }, 700);
@@ -175,17 +167,17 @@ export function PasswordGenerator() {
   const copyResult = useCallback(() => {
     if (!result || !strength) return;
     copyToClipboard(result, () => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      setCopiedFor(result);
+      setTimeout(() => setCopiedFor(null), 1500);
     });
     // The value is already kept; copying only records that it was taken up, so
     // the clear-unused sweep leaves it alone.
     void (async () => {
-      const at = savedAt ?? (await recordGeneratedPassword(result, ""));
+      const at = savedAtForResult ?? (await recordGeneratedPassword(result, ""));
       if (at) await markGeneratedPasswordUsed(at);
       refreshHistory();
     })();
-  }, [result, strength, copyToClipboard, refreshHistory, savedAt]);
+  }, [result, strength, copyToClipboard, refreshHistory, savedAtForResult]);
 
   const copyHistoryItem = useCallback((idx: number) => {
     const entry = history[idx];
@@ -433,7 +425,7 @@ export function PasswordGenerator() {
               <Checkbox label="@#!" checked={symbols} onChange={setSymbols} />
             </div>
             <Checkbox label="Exclude ambiguous (0O, 1lI)" checked={excludeAmbiguous} onChange={setExcludeAmbiguous} />
-            <Checkbox label={'Exclude problematic (\\\'\"{}< >)'} checked={excludeProblematic} onChange={setExcludeProblematic} />
+            <Checkbox label={`Exclude problematic (\\'"{}< >)`} checked={excludeProblematic} onChange={setExcludeProblematic} />
           </>
         )}
 

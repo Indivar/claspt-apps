@@ -33,7 +33,13 @@ export type RandomFill = (array: RandomArray) => void;
 const webCryptoFill: RandomFill | null =
   typeof globalThis !== "undefined" && globalThis.crypto?.getRandomValues
     ? (array) => {
-        globalThis.crypto.getRandomValues(array);
+        // The lib typings differ between the TypeScript versions the apps
+        // pin (5.6 on the desktop, 6 on the phone) in how a typed array's
+        // buffer is typed; the runtime contract is the same, so the call
+        // takes whatever this platform's signature asks for.
+        globalThis.crypto.getRandomValues(
+          array as unknown as Parameters<typeof globalThis.crypto.getRandomValues>[0],
+        );
       }
     : null;
 
@@ -120,25 +126,200 @@ const CONSONANTS = "bcdfghjklmnprstvwz";
 const VOWELS = "aeiou";
 const SYMBOLS = "!@#$%&*?";
 const NOUNS = [
-  "Alpha","Arrow","Atlas","Amber","Angel","Blade","Blaze","Bolt","Brave","Brook",
-  "Cedar","Chain","Chess","Cloud","Cobra","Comet","Coral","Crown","Cross","Crest",
-  "Dance","Delta","Depth","Dodge","Draft","Drake","Dream","Drift","Drum","Dusk",
-  "Eagle","Earth","Echo","Ember","Epoch","Fable","Falcon","Flame","Flash","Flint",
-  "Forge","Frost","Fury","Fuse","Fox","Ghost","Glade","Gleam","Globe","Grace","Grain",
-  "Grant","Grail","Grove","Guard","Haven","Hawk","Heart","Haze","Helm","Helix","Hero",
-  "Hive","Hoard","Horizon","Ivory","Iron","Isle","Iris","Jade","Jewel","Judge",
-  "Jungle","Karma","Kite","Knight","Knot","Lake","Lance","Lark","Latch","Leaf","Light",
-  "Lion","Lotus","Lunar","Lynx","Maple","March","Marsh","Mason","Medal","Mirth",
-  "Moose","Moth","Mount","Muse","Myth","Nexus","Noble","North","Nova","Oasis","Ocean",
-  "Omega","Onyx","Opera","Orbit","Otter","Oxide","Panda","Parch","Pearl","Phase",
-  "Pilot","Pixel","Plank","Plaza","Plume","Point","Prism","Probe","Pulse","Quail",
-  "Quartz","Quest","Raven","Razor","Realm","Ridge","River","Robin","Roost","Royal",
-  "Rune","Sage","Scale","Scout","Shade","Shark","Shell","Shore","Siege","Sigma",
-  "Silver","Slate","Solar","Spark","Spear","Spire","Sport","Stalk","Star","Steam",
-  "Steel","Stone","Storm","Stout","Surge","Swift","Sword","Thorn","Tide","Tiger",
-  "Torch","Tower","Trail","Tryst","Tulip","Tusk","Unity","Umbra","Vault","Verse",
-  "Vigor","Viper","Vista","Vivid","Vortex","Warden","Watch","Weave","Whale","Wheat",
-  "Wings","Winter","Witch","Wolf","Wren","Xenon","Yacht","Yield","Zenith","Zephyr",
+  "Alpha",
+  "Arrow",
+  "Atlas",
+  "Amber",
+  "Angel",
+  "Blade",
+  "Blaze",
+  "Bolt",
+  "Brave",
+  "Brook",
+  "Cedar",
+  "Chain",
+  "Chess",
+  "Cloud",
+  "Cobra",
+  "Comet",
+  "Coral",
+  "Crown",
+  "Cross",
+  "Crest",
+  "Dance",
+  "Delta",
+  "Depth",
+  "Dodge",
+  "Draft",
+  "Drake",
+  "Dream",
+  "Drift",
+  "Drum",
+  "Dusk",
+  "Eagle",
+  "Earth",
+  "Echo",
+  "Ember",
+  "Epoch",
+  "Fable",
+  "Falcon",
+  "Flame",
+  "Flash",
+  "Flint",
+  "Forge",
+  "Frost",
+  "Fury",
+  "Fuse",
+  "Fox",
+  "Ghost",
+  "Glade",
+  "Gleam",
+  "Globe",
+  "Grace",
+  "Grain",
+  "Grant",
+  "Grail",
+  "Grove",
+  "Guard",
+  "Haven",
+  "Hawk",
+  "Heart",
+  "Haze",
+  "Helm",
+  "Helix",
+  "Hero",
+  "Hive",
+  "Hoard",
+  "Horizon",
+  "Ivory",
+  "Iron",
+  "Isle",
+  "Iris",
+  "Jade",
+  "Jewel",
+  "Judge",
+  "Jungle",
+  "Karma",
+  "Kite",
+  "Knight",
+  "Knot",
+  "Lake",
+  "Lance",
+  "Lark",
+  "Latch",
+  "Leaf",
+  "Light",
+  "Lion",
+  "Lotus",
+  "Lunar",
+  "Lynx",
+  "Maple",
+  "March",
+  "Marsh",
+  "Mason",
+  "Medal",
+  "Mirth",
+  "Moose",
+  "Moth",
+  "Mount",
+  "Muse",
+  "Myth",
+  "Nexus",
+  "Noble",
+  "North",
+  "Nova",
+  "Oasis",
+  "Ocean",
+  "Omega",
+  "Onyx",
+  "Opera",
+  "Orbit",
+  "Otter",
+  "Oxide",
+  "Panda",
+  "Parch",
+  "Pearl",
+  "Phase",
+  "Pilot",
+  "Pixel",
+  "Plank",
+  "Plaza",
+  "Plume",
+  "Point",
+  "Prism",
+  "Probe",
+  "Pulse",
+  "Quail",
+  "Quartz",
+  "Quest",
+  "Raven",
+  "Razor",
+  "Realm",
+  "Ridge",
+  "River",
+  "Robin",
+  "Roost",
+  "Royal",
+  "Rune",
+  "Sage",
+  "Scale",
+  "Scout",
+  "Shade",
+  "Shark",
+  "Shell",
+  "Shore",
+  "Siege",
+  "Sigma",
+  "Silver",
+  "Slate",
+  "Solar",
+  "Spark",
+  "Spear",
+  "Spire",
+  "Sport",
+  "Stalk",
+  "Star",
+  "Steam",
+  "Steel",
+  "Stone",
+  "Storm",
+  "Stout",
+  "Surge",
+  "Swift",
+  "Sword",
+  "Thorn",
+  "Tide",
+  "Tiger",
+  "Torch",
+  "Tower",
+  "Trail",
+  "Tryst",
+  "Tulip",
+  "Tusk",
+  "Unity",
+  "Umbra",
+  "Vault",
+  "Verse",
+  "Vigor",
+  "Viper",
+  "Vista",
+  "Vivid",
+  "Vortex",
+  "Warden",
+  "Watch",
+  "Weave",
+  "Whale",
+  "Wheat",
+  "Wings",
+  "Winter",
+  "Witch",
+  "Wolf",
+  "Wren",
+  "Xenon",
+  "Yacht",
+  "Yield",
+  "Zenith",
+  "Zephyr",
   "Zinc",
 ];
 
@@ -148,7 +329,7 @@ const NOUNS = [
 function randomIndex(max: number): number {
   if (max <= 0) throw new Error("Cannot select from empty set");
   const arr = new Uint32Array(1);
-  const limit = Math.floor(0xFFFFFFFF / max) * max;
+  const limit = Math.floor(0xffffffff / max) * max;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     fillRandomBytes(arr);
@@ -266,7 +447,8 @@ export function generatePassword(opts: PasswordOptions): GenerateResult {
   if (opts.special) pools.push(filter(SPECIAL));
 
   const validPools = pools.filter((p) => p.length > 0);
-  if (validPools.length === 0) throw new Error("At least one character category must be enabled");
+  if (validPools.length === 0)
+    throw new Error("At least one character category must be enabled");
 
   const charset = validPools.flat();
   const chars: string[] = [];
@@ -311,7 +493,11 @@ export function generatePassword(opts: PasswordOptions): GenerateResult {
   }
 
   const entropy = length * Math.log2(charset.length);
-  return { value: chars.join(""), entropy_bits: entropy, strength: scoreEntropy(entropy) };
+  return {
+    value: chars.join(""),
+    entropy_bits: entropy,
+    strength: scoreEntropy(entropy),
+  };
 }
 
 export function generatePassphrase(
@@ -337,7 +523,11 @@ export function generatePassphrase(
   let entropy = wordCount * Math.log2(list.length);
   if (opts.includeNumber) entropy += Math.log2(10);
 
-  return { value: words.join(opts.separator), entropy_bits: entropy, strength: scoreEntropy(entropy) };
+  return {
+    value: words.join(opts.separator),
+    entropy_bits: entropy,
+    strength: scoreEntropy(entropy),
+  };
 }
 
 export function generateMemorable(opts: MemorableOptions): GenerateResult {
@@ -360,7 +550,11 @@ export function generateMemorable(opts: MemorableOptions): GenerateResult {
     }
 
     const entropy = syllableCount * Math.log2(CONSONANTS.length * VOWELS.length);
-    return { value: words.join("-"), entropy_bits: entropy, strength: scoreEntropy(entropy) };
+    return {
+      value: words.join("-"),
+      entropy_bits: entropy,
+      strength: scoreEntropy(entropy),
+    };
   }
 
   // Pattern style: Word42!Word
@@ -380,7 +574,11 @@ export function generateMemorable(opts: MemorableOptions): GenerateResult {
   const nounBits = wordCount * Math.log2(NOUNS.length);
   const sepBits = (wordCount - 1) * (2 * Math.log2(10) + Math.log2(SYMBOLS.length));
   const entropy = nounBits + sepBits;
-  return { value: parts.join(""), entropy_bits: entropy, strength: scoreEntropy(entropy) };
+  return {
+    value: parts.join(""),
+    entropy_bits: entropy,
+    strength: scoreEntropy(entropy),
+  };
 }
 
 export function generatePin(opts: PinOptions): GenerateResult {
