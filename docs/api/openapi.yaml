@@ -1,0 +1,1431 @@
+openapi: 3.1.0
+info:
+  title: Claspt Local API
+  version: 4.1.1
+  summary: The HTTP API the Claspt desktop app serves on 127.0.0.1 for the browser extension, the CLI, the MCP server, the SDKs and your own scripts.
+  description: |
+    Everything a tool does with a vault goes through this API, on the machine
+    that runs Claspt, over `http://127.0.0.1:9315` (the port is a setting).
+    Nothing listens on any other interface.
+
+    **Keys.** Every client has its own key, issued once and stored as a hash:
+    `claspt mcp install <tool>` for an AI tool, **Pair another browser** for the
+    extension, **Settings › Integrations › API Clients** for a script. Send it
+    as `Authorization: Bearer <key>` on every request. A key is *Notes* scope
+    (pages, memory and search, with secret values redacted and secret writes
+    refused) or *Secrets* scope (values can be read and written, with the
+    owner's approval).
+
+    **Approval, brake and log.** A Secrets-scope read asks the owner in the
+    app, naming the client and the page; approvals are once, until lock, or
+    standing for one client and one page. Each client may decrypt at most 15
+    secrets a minute to start. Every request is recorded with the client's
+    name; values are never logged.
+
+    **Secrets by reference.** Listings hand back
+    `claspt://secret/<page>?block=<label>#<field>` addresses beside every
+    field, so a tool can pass a secret to `claspt run` or `claspt inject`
+    without holding the value.
+
+    **Errors** are a JSON envelope: `{"error": {"code", "message", "details"}}`,
+    with the codes listed under the `Error` schema. Older responses that the
+    envelope does not cover are plain text with the same status.
+
+    **Concurrency.** Responses that return a page carry an `ETag`. Send it back
+    as `If-Match` on a write and the write is refused with 412 if the page
+    changed in between.
+
+    **Paths in URLs.** A page path with slashes goes in one URL segment,
+    encoded: `general%2Fnotes.md`. A page id works in the same place.
+
+    This document is kept in step with the route table by a test in the
+    repository: a route added to the app without a path here fails the build.
+  license:
+    name: PolyForm Shield License 1.0.0
+    url: https://polyformproject.org/licenses/shield/1.0.0/
+servers:
+  - url: http://127.0.0.1:9315
+    description: The Claspt app on this machine (the port is Settings › Integrations › Local API)
+security:
+  - bearerKey: []
+tags:
+  - name: Status
+  - name: Pairing
+  - name: Pages
+  - name: Secret blocks
+  - name: Page lifecycle
+  - name: Search
+  - name: Folders
+  - name: Generator
+  - name: Memory
+  - name: Secrets
+  - name: Audit
+  - name: Browser
+  - name: SSH
+  - name: Passkeys
+
+paths:
+  /api/status:
+    get:
+      tags: [Status]
+      summary: Server status, vault state, plan, features and who is asking
+      operationId: getStatus
+      responses:
+        "200":
+          description: The app answered and accepted the key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/pair:
+    post:
+      tags: [Pairing]
+      summary: Collect a key for the browser extension while the owner has opened the pairing window
+      description: |
+        Outside the key check on purpose: a client with no key cannot present
+        one. The gate is the pairing window the owner opens in **Settings ›
+        Integrations › Pair another browser**, which closes after two minutes
+        or the first successful pair. Any other time the answer is 403.
+      operationId: pair
+      security: []
+      responses:
+        "200":
+          description: A key, shown once. The extension stores it; nothing on disk holds it in the clear.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, scope, client_id, name]
+                properties:
+                  token: { type: string, description: The key. Store it; it is never shown again. }
+                  scope: { type: string, enum: [notes, secrets] }
+                  client_id: { type: string }
+                  name: { type: string, example: Browser extension on my-mac.local }
+        "403":
+          description: No pairing window is open.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/pages:
+    get:
+      tags: [Pages]
+      summary: List pages
+      operationId: listPages
+      parameters:
+        - { name: folder, in: query, schema: { type: string }, description: Exact folder match }
+        - { name: tag, in: query, schema: { type: string }, description: The page must carry this tag }
+        - { name: limit, in: query, schema: { type: integer, default: 200, maximum: 1000 } }
+        - { name: cursor, in: query, schema: { type: string }, description: The previous response's `next_cursor` }
+      responses:
+        "200":
+          description: A page of summaries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/PageSummary" } }
+                  next_cursor: { type: [string, "null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Pages]
+      summary: Create a page
+      description: A Notes-scope key cannot create a page that holds a secret block, and any write carrying a recognisable key outside a secret block is refused.
+      operationId: createPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                folder: { type: string, default: general }
+                content:
+                  type: string
+                  description: "Markdown, which may hold `:::secret[Label]` blocks in plaintext; they are encrypted on save."
+                tags: { type: array, items: { type: string } }
+      responses:
+        "201":
+          description: The created page.
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/pages/{path_or_id}:
+    parameters:
+      - { $ref: "#/components/parameters/PathOrId" }
+    get:
+      tags: [Pages]
+      summary: Read a page
+      description: With a Notes-scope key, secret block values are redacted.
+      operationId: readPage
+      responses:
+        "200":
+          description: The page with its content.
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Pages]
+      summary: Replace a page's content
+      description: Destructive; for one block use the secret block operations.
+      operationId: updatePage
+      parameters:
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        "200":
+          description: The updated page.
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+    delete:
+      tags: [Pages]
+      summary: Delete a page (it goes to the trash)
+      operationId: deletePage
+      parameters:
+        - { $ref: "#/components/parameters/IfMatch" }
+      responses:
+        "204": { description: Deleted. The page waits in the vault's trash. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+
+  /api/pages/{path_or_id}/secret:
+    parameters:
+      - { $ref: "#/components/parameters/PathOrId" }
+    get:
+      tags: [Secret blocks]
+      summary: List the secret blocks in a page
+      description: Notes scope gets labels with `fields` redacted; Secrets scope gets the fields and a `claspt://secret/…` reference per field.
+      operationId: listSecretBlocks
+      responses:
+        "200":
+          description: The blocks.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SecretBlock" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Secret blocks]
+      summary: Merge fields into one secret block
+      description: Fields not named are kept; an empty value removes a field. Secrets scope only.
+      operationId: patchSecretBlock
+      parameters:
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, fields]
+              properties:
+                label: { type: string, description: The block to change }
+                fields: { type: object, additionalProperties: { type: string } }
+                delete_fields: { type: array, items: { type: string } }
+                upsert: { type: boolean, default: false, description: Append a new block when none has this label }
+      responses:
+        "200":
+          description: The updated page, decrypted.
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+    delete:
+      tags: [Secret blocks]
+      summary: Remove one secret block
+      operationId: deleteSecretBlock
+      parameters:
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string }
+                delete_page_if_empty: { type: boolean, default: false }
+      responses:
+        "200":
+          description: The page survives; here it is.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "204": { description: The block was the page's only content and the page was deleted. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/pages/{path_or_id}/secret/rename:
+    parameters:
+      - { $ref: "#/components/parameters/PathOrId" }
+    patch:
+      tags: [Secret blocks]
+      summary: Rename a secret block
+      operationId: renameSecretBlock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_label, new_label]
+              properties:
+                old_label: { type: string }
+                new_label: { type: string }
+      responses:
+        "200":
+          description: The updated page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The new label is already used on this page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/pages/{path_or_id}/move:
+    parameters:
+      - { $ref: "#/components/parameters/PathOrId" }
+    patch:
+      tags: [Page lifecycle]
+      summary: Move a page to another folder
+      operationId: movePage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folder]
+              properties:
+                folder: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/PageUpdated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/pages/{path_or_id}/title:
+    parameters:
+      - { $ref: "#/components/parameters/PathOrId" }
+    patch:
+      tags: [Page lifecycle]
+      summary: Change a page's title
+      operationId: updateTitle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/PageUpdated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/pages/{path_or_id}/tags:
+    parameters:
+      - { $ref: "#/components/parameters/PathOrId" }
+    patch:
+      tags: [Page lifecycle]
+      summary: Replace a page's tags
+      operationId: updateTags
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags]
+              properties:
+                tags: { type: array, items: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/PageUpdated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/pages/{path_or_id}/pin:
+    parameters:
+      - { $ref: "#/components/parameters/PathOrId" }
+    patch:
+      tags: [Page lifecycle]
+      summary: Pin or unpin a page
+      operationId: pinPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pinned]
+              properties:
+                pinned: { type: boolean }
+      responses:
+        "200": { $ref: "#/components/responses/PageUpdated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/pages/{path_or_id}/archive:
+    parameters:
+      - { $ref: "#/components/parameters/PathOrId" }
+    patch:
+      tags: [Page lifecycle]
+      summary: Archive or unarchive a page
+      operationId: archivePage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [archived]
+              properties:
+                archived: { type: boolean }
+      responses:
+        "200": { $ref: "#/components/responses/PageUpdated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/search:
+    get:
+      tags: [Search]
+      summary: Full-text search
+      description: Results never carry secret values. A Notes-scope key cannot ask for `scope=secrets`.
+      operationId: search
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: scope, in: query, schema: { type: string, enum: [all, secrets], default: all } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+      responses:
+        "200":
+          description: Hits, best first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/SearchHit" } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/folders:
+    get:
+      tags: [Folders]
+      summary: List folders
+      operationId: listFolders
+      responses:
+        "200":
+          description: Every folder, nested ones as `parent/child`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { type: string } }
+    post:
+      tags: [Folders]
+      summary: Create a folder
+      operationId: createFolder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: credentials/team }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/folders/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+        description: "The folder, slashes encoded"
+    patch:
+      tags: [Folders]
+      summary: Rename a folder and move its pages
+      operationId: renameFolder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_name]
+              properties:
+                new_name: { type: string }
+      responses:
+        "200":
+          description: Renamed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  old_name: { type: string }
+                  new_name: { type: string }
+                  moved_pages: { type: integer }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Folders]
+      summary: Delete a folder, moving or deleting its pages
+      operationId: deleteFolder
+      parameters:
+        - { name: action, in: query, schema: { type: string, enum: [move, delete], default: move } }
+        - { name: move_to, in: query, schema: { type: string, default: general }, description: Where pages go with `action=move` }
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/generate/password:
+    post:
+      tags: [Generator]
+      summary: Generate a password
+      description: The generator needs no vault state and no key of a particular scope.
+      operationId: generatePassword
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                length: { type: integer, default: 20 }
+                uppercase: { type: boolean, default: true }
+                lowercase: { type: boolean, default: true }
+                digits: { type: boolean, default: true }
+                symbols: { type: boolean, default: true }
+                exclude_ambiguous: { type: boolean, default: false }
+                exclude_problematic: { type: boolean, default: false }
+                max_symbols:
+                  type: integer
+                  description: "Cap on symbols, for sites that accept only a few"
+      responses:
+        "200": { $ref: "#/components/responses/Generated" }
+
+  /api/generate/passphrase:
+    post:
+      tags: [Generator]
+      summary: Generate a passphrase
+      operationId: generatePassphrase
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                word_count: { type: integer, default: 5 }
+                separator: { type: string, default: "-" }
+                capitalize: { type: boolean, default: true }
+                include_number: { type: boolean, default: false }
+      responses:
+        "200": { $ref: "#/components/responses/Generated" }
+
+  /api/generate/memorable:
+    post:
+      tags: [Generator]
+      summary: Generate a memorable password
+      operationId: generateMemorable
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                word_count: { type: integer, default: 4 }
+                separator: { type: string, default: "-" }
+      responses:
+        "200": { $ref: "#/components/responses/Generated" }
+
+  /api/generate/pin:
+    post:
+      tags: [Generator]
+      summary: Generate a PIN
+      operationId: generatePin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                length: { type: integer, default: 6 }
+      responses:
+        "200": { $ref: "#/components/responses/Generated" }
+
+  /api/generate/uuid:
+    get:
+      tags: [Generator]
+      summary: Generate a UUID v4
+      operationId: generateUuid
+      responses:
+        "200":
+          description: A UUID.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  value: { type: string, format: uuid }
+
+  /api/generate/strength:
+    post:
+      tags: [Generator]
+      summary: Estimate a password's strength
+      operationId: passwordStrength
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        "200":
+          description: The estimate.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strength" }
+
+  /api/generate/bulk:
+    post:
+      tags: [Generator]
+      summary: Generate up to 100 values of one kind
+      operationId: generateBulk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, enum: [password, passphrase, memorable, pin, uuid] }
+                options: { type: object, description: The same options as the single-value route of that kind }
+                count: { type: integer, default: 10, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: The values.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { type: string } }
+
+  /api/memory:
+    get:
+      tags: [Memory]
+      summary: List the memory namespaces this key may use
+      operationId: listMemoryNamespaces
+      responses:
+        "200":
+          description: Namespaces, one per project plus `global`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { type: string } }
+
+  /api/memory/search:
+    get:
+      tags: [Memory]
+      summary: Search every memory the key may use
+      description: Ranked by meaning when a local Ollama answers, otherwise by keyword; `ranking` says which. Nothing leaves the machine.
+      operationId: searchMemory
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: namespaces, in: query, schema: { type: string }, description: Comma-separated; default every namespace the key may use }
+        - { name: limit, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        "200":
+          description: Hits, with the ranking used.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ranking, namespaces, hits]
+                properties:
+                  ranking: { type: string, enum: [semantic, keyword] }
+                  namespaces: { type: array, items: { type: string } }
+                  hits:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        page_id: { type: string }
+                        title: { type: string }
+                        namespace: { type: string }
+                        path: { type: string }
+                        snippet: { type: string }
+                        score: { type: number }
+                        kind: { type: [string, "null"], enum: [episodic, semantic, procedural, null] }
+                        stale: { type: boolean }
+                        reviewed: { type: boolean }
+                        written_by: { type: [string, "null"] }
+                        read_count: { type: integer }
+
+  /api/memory/cleanup:
+    post:
+      tags: [Memory]
+      summary: Delete memories whose time-to-live has passed
+      operationId: cleanupMemory
+      responses:
+        "200":
+          description: How many were removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer }
+
+  /api/memory/{namespace}:
+    parameters:
+      - { $ref: "#/components/parameters/Namespace" }
+    get:
+      tags: [Memory]
+      summary: List the memories in a namespace
+      operationId: listMemory
+      parameters:
+        - { name: tag, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Summaries, each with its review and read state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/MemorySummary" } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [Memory]
+      summary: Create or replace a memory
+      description: The page is marked unreviewed until the owner reads it in the app. Send `If-Match` to refuse the write if another client changed the page in between. A write carrying a recognisable key outside a secret block is refused.
+      operationId: upsertMemory
+      parameters:
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MemoryInput" }
+      responses:
+        "200": { $ref: "#/components/responses/Memory" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+
+  /api/memory/{namespace}/bulk:
+    parameters:
+      - { $ref: "#/components/parameters/Namespace" }
+    post:
+      tags: [Memory]
+      summary: Create or replace several memories
+      operationId: bulkUpsertMemory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [memories]
+              properties:
+                memories: { type: array, items: { $ref: "#/components/schemas/MemoryInput" } }
+      responses:
+        "200":
+          description: The pages written.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Page" } }
+
+  /api/memory/{namespace}/bootstrap:
+    parameters:
+      - { $ref: "#/components/parameters/Namespace" }
+    post:
+      tags: [Memory]
+      summary: Scaffold a project's memory pages
+      description: Creates the guide, conventions, decisions and session-log pages for a namespace, plus the shared `global` namespace, and says which namespace it landed in and why.
+      operationId: bootstrapMemory
+      responses:
+        "200":
+          description: What was created and where.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/memory/{namespace}/{title}:
+    parameters:
+      - { $ref: "#/components/parameters/Namespace" }
+      - { $ref: "#/components/parameters/MemoryTitle" }
+    get:
+      tags: [Memory]
+      summary: Read a memory
+      description: The content of an unreviewed memory arrives inside markers saying it is unreviewed data from another session, not instructions. With `max_bytes` only a window is returned and `truncated` says so; a window is never cut inside an encrypted block.
+      operationId: readMemory
+      parameters:
+        - { name: max_bytes, in: query, schema: { type: integer }, description: Return at most this much of the content }
+        - name: tail
+          in: query
+          schema: { type: boolean, default: false }
+          description: "With `max_bytes`, take the window from the end"
+      responses:
+        "200": { $ref: "#/components/responses/Memory" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Memory]
+      summary: Delete a memory
+      operationId: deleteMemory
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/memory/{namespace}/{title}/append:
+    parameters:
+      - { $ref: "#/components/parameters/Namespace" }
+      - { $ref: "#/components/parameters/MemoryTitle" }
+    post:
+      tags: [Memory]
+      summary: Add text to the end of a memory
+      description: The existing body is not read back or re-sent, so two clients appending at once both land. A missing page is created.
+      operationId: appendMemory
+      parameters:
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Memory" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+
+  /api/memory/{namespace}/{title}/verify:
+    parameters:
+      - { $ref: "#/components/parameters/Namespace" }
+      - { $ref: "#/components/parameters/MemoryTitle" }
+    post:
+      tags: [Memory]
+      summary: Confirm a memory is still true
+      description: Sets `verified_on` to now, so a stale mark based on age is lifted.
+      operationId: verifyMemory
+      responses:
+        "200": { $ref: "#/components/responses/Memory" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/memory/{namespace}/{title}/compact:
+    parameters:
+      - { $ref: "#/components/parameters/Namespace" }
+      - { $ref: "#/components/parameters/MemoryTitle" }
+    post:
+      tags: [Memory]
+      summary: Move older sections of a running log into a dated archive page
+      operationId: compactMemory
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keep_sections: { type: integer, default: 10, description: How many of the newest sections stay }
+      responses:
+        "200":
+          description: The compacted page and where the rest went.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/secrets:
+    get:
+      tags: [Secrets]
+      summary: Find secrets across the vault, by label and page, never by value
+      description: Any scope may call it. With a Secrets-scope key each hit also says whether the block is encrypted on disk.
+      operationId: findSecrets
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Matches.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/FoundSecret" }
+    post:
+      tags: [Secrets]
+      summary: Store a credential as an encrypted secret block
+      description: Writes into `ai/<service>`; the page title is the service name. Secrets scope only. The response carries references for each field so the caller can hand them on without the values.
+      operationId: storeSecret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [service, label]
+              properties:
+                service:
+                  type: string
+                  description: "A name for the page, without slashes"
+                label: { type: string, description: The block's label }
+                fields: { type: object, additionalProperties: { type: string } }
+                tags: { type: array, items: { type: string } }
+                agent_ns: { type: string, default: mcp }
+      responses:
+        "200":
+          description: The page written, with warnings if anything was odd.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  page: { $ref: "#/components/schemas/Page" }
+                  references: { type: object, additionalProperties: { type: string }, description: "`claspt://secret/…` per field" }
+                  warnings: { type: array, items: { type: string } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/audit/secrets:
+    get:
+      tags: [Audit]
+      summary: List every place secret material sits in the vault unencrypted
+      description: Plaintext secret blocks and recognisable keys in note text, each named by page, label or line, and pattern. Values are never returned. Secrets scope only.
+      operationId: auditSecrets
+      responses:
+        "200":
+          description: Findings; an empty list is the good answer.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    page_path: { type: string }
+                    page_title: { type: string }
+                    kind:
+                      type: string
+                      description: "What was found, for example `plaintext_block` or a key pattern's name"
+                    label: { type: [string, "null"] }
+                    line: { type: [integer, "null"] }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/audit/rotation:
+    get:
+      tags: [Audit]
+      summary: Passwords older than the vault's rotation limit
+      description: For a generated password the age is real, from the generator's history; for a hand-typed one it is the page's last save, and `basis` says which.
+      operationId: auditRotation
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  max_age_days: { type: integer }
+                  due:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        page_path: { type: string }
+                        page_title: { type: string }
+                        label: { type: string }
+                        field: { type: string }
+                        since: { type: string, format: date-time }
+                        age_days: { type: integer }
+                        basis: { type: string, enum: [generated, page_updated] }
+
+  /api/browser/login/{page_or_job}:
+    parameters:
+      - { name: page_or_job, in: path, required: true, schema: { type: string }, description: A page path or id on POST; a job id on GET }
+    post:
+      tags: [Browser]
+      summary: Ask the browser extension to log in with a credential from this page
+      description: The owner approves in the app; the credential goes to the paired extension in a one-shot job; the caller gets a job id and never the value. Secrets scope, and the browser with the extension must be open.
+      operationId: browserLogin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  description: "Which block on the page, when it has several"
+                url: { type: string, description: Where to log in; the active tab when absent }
+                submit: { type: boolean, default: true }
+      responses:
+        "202":
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobStatus" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    get:
+      tags: [Browser]
+      summary: The outcome of a login job
+      operationId: browserLoginStatus
+      responses:
+        "200":
+          description: Queued, taken by the extension, or done with `ok` and a message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobStatus" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/browser/jobs:
+    get:
+      tags: [Browser]
+      summary: The paired extension takes the next login job
+      description: Only a client paired as the browser extension and holding Secrets scope may take jobs; they carry a decrypted credential.
+      operationId: browserJobsPoll
+      parameters:
+        - { name: wait, in: query, schema: { type: integer }, description: Long-poll for up to this many seconds }
+      responses:
+        "200":
+          description: A job, or nothing yet.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job:
+                    type: [object, "null"]
+                    properties:
+                      id: { type: string }
+                      url: { type: string }
+                      submit: { type: boolean }
+                      requested_by: { type: string }
+                      credential: { type: object, additionalProperties: { type: string } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/browser/jobs/{job_id}/result:
+    parameters:
+      - { name: job_id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Browser]
+      summary: The extension reports how a login job went
+      operationId: browserJobResult
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ok]
+              properties:
+                ok: { type: boolean }
+                message: { type: string }
+      responses:
+        "204": { description: Recorded. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/ssh/identities:
+    get:
+      tags: [SSH]
+      summary: The keys the SSH agent offers
+      description: Public halves and where they live; the private halves never leave the vault. Any scope.
+      operationId: sshIdentities
+      responses:
+        "200":
+          description: Identities.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    page: { type: string }
+                    page_title: { type: string }
+                    label: { type: string }
+                    public_key: { type: string }
+                    fingerprint: { type: string }
+
+  /api/passkeys:
+    get:
+      tags: [Passkeys]
+      summary: The passkeys stored for a site, for a picker
+      operationId: listPasskeys
+      parameters:
+        - { name: rp_id, in: query, required: true, schema: { type: string }, example: github.com }
+      responses:
+        "200":
+          description: Names and ids only.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    page_path: { type: string }
+                    label: { type: string }
+                    rp_id: { type: string }
+                    rp_name: { type: string }
+                    credential_id: { type: string }
+                    user_name: { type: string }
+                    user_display_name: { type: string }
+                    created: { type: string }
+                    last_used: { type: [string, "null"] }
+
+  /api/passkeys/{rp_id}/register:
+    parameters:
+      - { $ref: "#/components/parameters/RpId" }
+    post:
+      tags: [Passkeys]
+      summary: Create a passkey for a site
+      description: The extension relays the site's WebAuthn creation request; the desktop makes the key, asks the owner, and answers. The relying party in the path and the body must agree. Secrets scope.
+      operationId: registerPasskey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [origin, rp, user, challenge]
+              properties:
+                origin: { type: string }
+                cross_origin: { type: boolean, default: false }
+                rp: { type: object, properties: { id: { type: string }, name: { type: string } } }
+                user: { type: object, properties: { id: { type: string }, name: { type: string }, display_name: { type: string } } }
+                challenge: { type: string, description: Base64url }
+                pub_key_cred_params: { type: array, items: { type: integer }, description: COSE algorithms the site accepts; ES256 (-7) is supported }
+      responses:
+        "200":
+          description: The attestation the extension hands back to the site.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/passkeys/{rp_id}/authenticate:
+    parameters:
+      - { $ref: "#/components/parameters/RpId" }
+    post:
+      tags: [Passkeys]
+      summary: Sign a site's challenge with a stored passkey
+      operationId: authenticatePasskey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [origin, rp_id, challenge]
+              properties:
+                origin: { type: string }
+                cross_origin: { type: boolean, default: false }
+                rp_id: { type: string }
+                challenge: { type: string, description: Base64url }
+                allow_credentials: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: The assertion the extension hands back to the site.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerKey:
+      type: http
+      scheme: bearer
+      description: The client's key, issued once by pairing, `claspt mcp install`, or Settings › Integrations › API Clients.
+
+  headers:
+    ETag:
+      description: The page's version; send it back as `If-Match` on the next write.
+      schema: { type: string }
+
+  parameters:
+    PathOrId:
+      name: path_or_id
+      in: path
+      required: true
+      schema: { type: string }
+      description: A page path with slashes encoded (`general%2Fnotes.md`), or a page id.
+    IfMatch:
+      name: If-Match
+      in: header
+      schema: { type: string }
+      description: The `ETag` from the last read; the write is refused with 412 if the page changed since.
+    Namespace:
+      name: namespace
+      in: path
+      required: true
+      schema: { type: string }
+      description: A project's memory namespace, or `global`.
+    MemoryTitle:
+      name: title
+      in: path
+      required: true
+      schema: { type: string }
+    RpId:
+      name: rp_id
+      in: path
+      required: true
+      schema: { type: string }
+      description: The site's relying-party id, for example `github.com`.
+
+  responses:
+    PageUpdated:
+      description: The updated page; the path may have changed.
+      headers: { ETag: { $ref: "#/components/headers/ETag" } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Page" }
+    Memory:
+      description: The memory page with its review and read state.
+      headers: { ETag: { $ref: "#/components/headers/ETag" } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Memory" }
+    Generated:
+      description: The value and its strength.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              value: { type: string }
+              strength: { $ref: "#/components/schemas/Strength" }
+    Unauthorized:
+      description: No key, or a key the open vault does not know. Run `claspt mcp doctor`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The key's scope does not allow this, the owner declined, the rate limit is reached, or the vault is locked.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such page, block, memory or job.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: The request is malformed, or the path is not allowed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PreconditionFailed:
+      description: The page changed since the `If-Match` value was read; read again and retry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [BAD_REQUEST, INVALID_PATH, UNAUTHORIZED, VAULT_LOCKED, SCOPE_INSUFFICIENT, APPROVAL_DENIED, NOT_FOUND, BLOCK_NOT_FOUND, LABEL_CONFLICT, PRECONDITION_FAILED, PAIRING_CLOSED, NOT_READY, INTERNAL_ERROR]
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+    Status:
+      type: object
+      required: [status, version, vault_format_version, vault_unlocked, mode, features, client]
+      properties:
+        status: { type: string, const: ok }
+        version: { type: string, example: 4.1.1 }
+        vault_format_version: { type: integer }
+        vault_sync_version: { type: integer, description: The sync revision shown in the desktop's status bar; absent when sync is off }
+        vault_unlocked: { type: boolean }
+        plan: { type: [string, "null"], enum: [Free, Pro, null] }
+        mode: { type: string, enum: [desktop, headless] }
+        features:
+          type: object
+          description: Feature-detect against this rather than comparing versions.
+          additionalProperties: { type: boolean }
+        client:
+          type: object
+          description: Who is asking, from the key.
+          properties:
+            id: { type: string }
+            name: { type: string }
+            scope: { type: string, enum: [notes, secrets] }
+    PageMeta:
+      type: object
+      required: [id, title, created_at, updated_at, pinned, archived, tags, folder, encrypted]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        pinned: { type: boolean }
+        archived: { type: boolean }
+        tags: { type: array, items: { type: string } }
+        folder: { type: string }
+        encrypted: { type: boolean, description: Whether the whole page is encrypted }
+        agent_ns: { type: [string, "null"] }
+        memory_kind: { type: [string, "null"], enum: [episodic, semantic, procedural, null] }
+        ttl_hours: { type: [integer, "null"] }
+        valid_from: { type: [string, "null"], format: date-time }
+        valid_until: { type: [string, "null"], format: date-time }
+        written_by_client: { type: [string, "null"] }
+        written_by_name: { type: [string, "null"] }
+        custom_meta: { type: [object, "null"], additionalProperties: { type: string } }
+    Page:
+      type: object
+      required: [meta, content, path]
+      properties:
+        meta: { $ref: "#/components/schemas/PageMeta" }
+        content:
+          type: string
+          description: "Markdown; secret block values decrypted with Secrets scope, redacted with Notes scope"
+        path: { type: string, example: credentials/github.md }
+    PageSummary:
+      type: object
+      required: [meta, path, snippet]
+      properties:
+        meta: { $ref: "#/components/schemas/PageMeta" }
+        path: { type: string }
+        snippet: { type: string }
+    SecretBlock:
+      type: object
+      required: [label, fields]
+      properties:
+        label: { type: string }
+        fields:
+          type: object
+          description: "Field values with Secrets scope; `{\"redacted\": true}` with Notes scope."
+          additionalProperties: true
+        references:
+          type: object
+          description: "`claspt://secret/…` per field, so the value need not be handed on."
+          additionalProperties: { type: string }
+    SearchHit:
+      type: object
+      properties:
+        page_id: { type: string }
+        path: { type: string }
+        title: { type: string }
+        folder: { type: string }
+        snippet: { type: string }
+        score: { type: number }
+        secret_labels: { type: array, items: { type: string } }
+    Strength:
+      type: object
+      properties:
+        score: { type: integer, minimum: 0, maximum: 4 }
+        label: { type: string }
+        entropy:
+          type: number
+          description: "Bits, an upper bound once a symbol cap applies"
+    MemoryInput:
+      type: object
+      required: [title, content]
+      properties:
+        title: { type: string }
+        content: { type: string, description: Markdown; a recognisable key outside a secret block is refused }
+        tags: { type: array, items: { type: string } }
+        ttl_hours: { type: integer }
+        custom_meta: { type: object, additionalProperties: { type: string } }
+        kind: { type: string, enum: [episodic, semantic, procedural] }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        superseded_by: { type: string, description: The title of the memory that replaced this one }
+        verified_on: { type: string, format: date-time }
+    Memory:
+      allOf:
+        - { $ref: "#/components/schemas/Page" }
+        - type: object
+          properties:
+            stale: { type: boolean, description: The validity window closed or the memory was superseded }
+            reviewed: { type: boolean, description: The owner has read it in the app since the last write }
+            read_count: { type: integer }
+            last_read: { type: [string, "null"], format: date-time }
+            warnings: { type: array, items: { type: string } }
+            truncated: { type: boolean, description: Only with `max_bytes` }
+            total_bytes: { type: integer, description: Only with `max_bytes` }
+    MemorySummary:
+      allOf:
+        - { $ref: "#/components/schemas/PageSummary" }
+        - type: object
+          properties:
+            stale: { type: boolean }
+            reviewed: { type: boolean }
+            read_count: { type: integer }
+            last_read: { type: [string, "null"], format: date-time }
+    FoundSecret:
+      type: object
+      properties:
+        label: { type: string }
+        page_title: { type: string }
+        page_path: { type: string }
+        folder: { type: string }
+        tags: { type: array, items: { type: string } }
+        encrypted: { type: [boolean, "null"], description: Whether the block is encrypted on disk; only with Secrets scope }
+        references: { type: object, additionalProperties: { type: string } }
+    JobStatus:
+      type: object
+      required: [id, state]
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [queued, taken, done] }
+        ok: { type: boolean }
+        message: { type: string }
