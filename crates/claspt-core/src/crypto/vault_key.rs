@@ -485,6 +485,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn change_password_preserves_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
 

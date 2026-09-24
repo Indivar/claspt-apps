@@ -527,13 +527,16 @@ mod tests {
 
     #[test]
     fn every_client_parses_by_name_and_has_a_user_path_on_every_platform() {
-        let home = Path::new("/home/u");
-        let cfg = Path::new("/home/u/.config");
-        let cwd = Path::new("/work/repo");
+        // Rooted in a real absolute directory: "/home/u" is not absolute on
+        // Windows, where an absolute path starts with a drive.
+        let root = std::env::temp_dir();
+        let home = root.join("u");
+        let cfg = home.join(".config");
+        let cwd = root.join("repo");
         for client in Client::ALL {
             assert_eq!(Client::parse(client.name()), Some(client));
             assert_eq!(Client::parse(&client.name().to_uppercase()), Some(client));
-            let path = config_path(client, Scope::User, home, cfg, cwd).unwrap();
+            let path = config_path(client, Scope::User, &home, &cfg, &cwd).unwrap();
             assert!(path.is_absolute(), "{path:?}");
         }
         assert_eq!(Client::parse("vim"), None);
