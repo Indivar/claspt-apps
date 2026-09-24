@@ -67,7 +67,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format
-        run: cargo fmt -p claspt -p claspt-core --check
+        # The commercial modules are declared with rustfmt::skip so that a tree
+        # without them still formats; every file present is then checked by name.
+        run: |
+          cargo fmt -p claspt -p claspt-core --check
+          find src-tauri/src crates/claspt-core/src -name '*.rs' -print0 \
+            | xargs -0 rustfmt --check --edition 2021
       - name: Clippy (deny warnings)
         run: cargo clippy -p claspt -p claspt-core --all-targets -- -D warnings
       - name: Tests

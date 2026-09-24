@@ -24,6 +24,7 @@ pub mod import_history;
 pub mod memory_reads;
 pub mod security_alerts;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod share_log;
 pub mod store;
 pub mod templates;

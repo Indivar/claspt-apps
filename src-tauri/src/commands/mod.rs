@@ -31,13 +31,17 @@ pub mod git;
 pub mod import;
 pub mod internal;
 #[cfg(feature = "pro")]
+// rustfmt would otherwise try to open this module, which the public tree does not carry.
+#[rustfmt::skip]
 pub mod license;
 pub mod pages;
 pub mod passkeys;
 pub mod search;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod share;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod sync;
 #[cfg(not(feature = "pro"))]
 #[path = "../pro_stubs/sync_commands.rs"]

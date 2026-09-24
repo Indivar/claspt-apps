@@ -84,6 +84,8 @@ pub mod fs_perms;
 pub mod git;
 pub mod pages;
 #[cfg(feature = "pro")]
+// rustfmt would otherwise try to open this module, which the public tree does not carry.
+#[rustfmt::skip]
 pub mod sync;
 
 // Re-export key types for Rust consumers (desktop)

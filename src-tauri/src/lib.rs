@@ -36,6 +36,8 @@ mod import;
 mod inbox;
 pub mod internal;
 #[cfg(feature = "pro")]
+// rustfmt would otherwise try to open this module, which the public tree does not carry.
+#[rustfmt::skip]
 mod license;
 #[cfg(not(feature = "pro"))]
 #[path = "pro_stubs/license.rs"]
@@ -49,9 +51,11 @@ mod search;
 pub mod secret_ref;
 pub mod serve;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod share;
 pub mod ssh_agent;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod sync;
 #[cfg(not(feature = "pro"))]
 #[path = "pro_stubs/sync.rs"]
@@ -360,6 +364,7 @@ macro_rules! invoke_handlers {
 /// The commercial build's extra commands live in their own module, so this
 /// file names the seam and not the features behind it.
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod pro;
 
 /// The IPC handler for this build.
