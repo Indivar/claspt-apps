@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  FIREFOX_ANDROID_MIN_VERSION,
   FIREFOX_MIN_VERSION,
   toFirefoxManifest,
 } from "../../scripts/firefox-manifest.mjs";
@@ -29,6 +30,13 @@ describe("toFirefoxManifest", () => {
     expect(firefox.browser_specific_settings.gecko.data_collection_permissions).toEqual({
       required: ["none"],
     });
+    // Below 140 (desktop) and 142 (Android) Firefox ignores
+    // data_collection_permissions and AMO's validator warns.
+    expect(Number.parseFloat(FIREFOX_MIN_VERSION)).toBeGreaterThanOrEqual(140);
+    expect(firefox.browser_specific_settings.gecko_android.strict_min_version).toBe(
+      FIREFOX_ANDROID_MIN_VERSION,
+    );
+    expect(Number.parseFloat(FIREFOX_ANDROID_MIN_VERSION)).toBeGreaterThanOrEqual(142);
   });
 
   it("leaves everything the browsers share untouched, and the Chrome manifest itself", () => {

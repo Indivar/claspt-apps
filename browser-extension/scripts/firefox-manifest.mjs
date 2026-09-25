@@ -12,10 +12,15 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-/** The Firefox version the build is tested against: MV3 background scripts,
- *  optional host permissions, storage.session access levels and document_start
- *  page-world injection all behave from here on. */
-export const FIREFOX_MIN_VERSION = "128.0";
+/** The Firefox version the build targets. MV3 background scripts, optional
+ *  host permissions, storage.session access levels and document_start
+ *  page-world injection all behave from 128; 140 is the first version that
+ *  reads data_collection_permissions, which AMO requires, so a lower minimum
+ *  draws a validator warning on every submission (raised 2026-09-25). */
+export const FIREFOX_MIN_VERSION = "140.0";
+
+/** Firefox for Android reads data_collection_permissions from 142. */
+export const FIREFOX_ANDROID_MIN_VERSION = "142.0";
 
 /**
  * @param {Record<string, unknown>} chrome The Chrome manifest, parsed.
@@ -33,9 +38,10 @@ export function toFirefoxManifest(chrome) {
       type: background.type ?? "module",
     };
   }
-  const settings = /** @type {{ gecko?: Record<string, unknown> }} */ (
-    out.browser_specific_settings ?? {}
-  );
+  const settings =
+    /** @type {{ gecko?: Record<string, unknown>; gecko_android?: Record<string, unknown> }} */ (
+      out.browser_specific_settings ?? {}
+    );
   out.browser_specific_settings = {
     ...settings,
     gecko: {
@@ -44,6 +50,10 @@ export function toFirefoxManifest(chrome) {
       // AMO requires every listing to say what it collects. Nothing: the
       // extension talks to the desktop app on this machine and nowhere else.
       data_collection_permissions: { required: ["none"] },
+    },
+    gecko_android: {
+      ...(settings.gecko_android ?? {}),
+      strict_min_version: FIREFOX_ANDROID_MIN_VERSION,
     },
   };
   return out;

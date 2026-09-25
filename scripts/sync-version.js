@@ -4,7 +4,7 @@
 
 /**
  * Sync the version from package.json (single source of truth)
- * into tauri.conf.json and Cargo.toml.
+ * into tauri.conf.json, Cargo.toml, the MCP manifest and the OpenAPI document.
  *
  * Usage: node scripts/sync-version.js
  * Runs automatically via predev / prebuild npm scripts.
@@ -54,4 +54,21 @@ if (currentMatch && currentMatch[0] !== `version = "${version}"`) {
   console.log(`synced Cargo.toml → ${version}`);
 } else {
   console.log(`Cargo.toml already at ${version}`);
+}
+
+// 5. Sync the OpenAPI document, whose info.version names the app it describes.
+// A test holds the two together, so a bump that forgets this line fails CI.
+const openapiPath = resolve(root, "docs/api/openapi.yaml");
+let openapi = readFileSync(openapiPath, "utf-8");
+const openapiVersionRe = /^(info:\n(?:  .*\n)*?  version: )([^\n]*)$/m;
+const openapiMatch = openapi.match(openapiVersionRe);
+if (openapiMatch && openapiMatch[2] !== version) {
+  openapi = openapi.replace(openapiVersionRe, `$1${version}`);
+  writeFileSync(openapiPath, openapi);
+  console.log(`synced docs/api/openapi.yaml → ${version}`);
+} else if (!openapiMatch) {
+  console.error("docs/api/openapi.yaml: no info.version line found");
+  process.exit(1);
+} else {
+  console.log(`docs/api/openapi.yaml already at ${version}`);
 }

@@ -12,6 +12,10 @@
  * still held in memory (used after auto-lock), avoiding a full re-unlock.
  */
 import { useState, useEffect, useRef } from "react";
+import {
+  biometricUnlockOffered,
+  shouldAutoPromptBiometric,
+} from "@/lib/biometric-prompt";
 import { open } from "@tauri-apps/plugin-dialog";
 import { VERSION_DISPLAY } from "@/lib/version";
 import { useUIStore, isDarkTheme } from "@/stores/ui-store";
@@ -209,6 +213,7 @@ export function UnlockScreen() {
     biometricMode,
     biometricFailures,
     hasUnlockedWithPassword,
+    lockReason,
     checkBiometric,
     unlockWithBiometric,
   } = useVaultStore();
@@ -218,22 +223,46 @@ export function UnlockScreen() {
   const { theme, cycleTheme } = useUIStore();
 
   const biometricAutoTriggered = useRef(false);
+  const biometricButtonRef = useRef<HTMLButtonElement>(null);
+  const biometricButtonFocused = useRef(false);
 
   useEffect(() => {
     checkBiometric(vaultDir);
   }, [checkBiometric, vaultDir]);
 
-  // Auto-trigger biometric prompt when the unlock screen appears and
-  // biometric is available (e.g. after auto-lock in "primary" mode,
-  // or "reauth" mode after password was already entered this session).
+  // Start the OS biometric prompt by itself only on a cold start with the
+  // window in front. After a lock the app performed on its own, or one the
+  // person asked for, the prompt waits for the button: the OS dialog is
+  // system-modal and would otherwise land on top of unrelated work every
+  // time the idle lock fired. See shouldAutoPromptBiometric.
   useEffect(() => {
     if (biometricAutoTriggered.current) return;
-    if (!biometricAvailable || biometricFailures >= 3 || loading) return;
-    const canBiometric =
-      biometricMode === "enabled" ||
-      biometricMode === "primary" ||
-      (biometricMode === "reauth" && hasUnlockedWithPassword);
-    if (!canBiometric) return;
+    if (loading) return;
+    const automatic = shouldAutoPromptBiometric({
+      lockReason,
+      biometricAvailable,
+      biometricMode,
+      biometricFailures,
+      loading,
+      hasUnlockedWithPassword,
+      windowFocused: document.hasFocus(),
+      pageVisible: document.visibilityState === "visible",
+    });
+    if (!automatic) {
+      // The person unlocks when they choose to. Put the button under their
+      // fingers once, so Enter or Space raises the prompt without a mouse.
+      if (
+        biometricAvailable &&
+        biometricMode === "primary" &&
+        biometricFailures < 3 &&
+        !biometricButtonFocused.current &&
+        biometricButtonRef.current
+      ) {
+        biometricButtonFocused.current = true;
+        biometricButtonRef.current.focus();
+      }
+      return;
+    }
 
     biometricAutoTriggered.current = true;
     // Small delay so the unlock screen renders before the OS prompt appears
@@ -246,6 +275,7 @@ export function UnlockScreen() {
     biometricMode,
     biometricFailures,
     hasUnlockedWithPassword,
+    lockReason,
     loading,
     vaultDir,
     unlockWithBiometric,
@@ -640,11 +670,10 @@ export function UnlockScreen() {
                   {mode === "unlock" &&
                     biometricAvailable &&
                     biometricFailures < 3 &&
-                    (biometricMode === "enabled" ||
-                      biometricMode === "primary" ||
-                      (biometricMode === "reauth" && hasUnlockedWithPassword)) && (
+                    biometricUnlockOffered(biometricMode, hasUnlockedWithPassword) && (
                       <div className="pt-1">
                         <button
+                          ref={biometricButtonRef}
                           type="button"
                           disabled={loading}
                           onClick={() => unlockWithBiometric(vaultDir)}

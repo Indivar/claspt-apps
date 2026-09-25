@@ -225,7 +225,7 @@ function App() {
   useEffect(() => {
     const unlisten = listen("vault-key-locked", () => {
       // Key is zeroed — need full re-unlock with password next time
-      useVaultStore.setState({ isUnlocked: false, isUILocked: false });
+      useVaultStore.setState({ isUnlocked: false, isUILocked: false, lockReason: "key" });
     });
     return () => {
       unlisten.then((f) => f());

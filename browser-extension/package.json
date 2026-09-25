@@ -1,6 +1,6 @@
 {
   "name": "claspt-browser-extension",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "license": "PolyForm-Shield-1.0.0",
   "private": true,
   "type": "module",
@@ -14,11 +14,12 @@
     "build:content": "vite build --config vite.content.config.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
-    "package": "npm run build && rm -f claspt-extension-$npm_package_version.zip && (cd dist && zip -r -q ../claspt-extension-$npm_package_version.zip . -x '**/*.map') && ls -lh claspt-extension-$npm_package_version.zip",
-    "package:firefox": "npm run build && node scripts/firefox-manifest.mjs --write && rm -f claspt-extension-firefox-$npm_package_version.zip && (cd dist && zip -r -q ../claspt-extension-firefox-$npm_package_version.zip . -x '**/*.map') && ls -lh claspt-extension-firefox-$npm_package_version.zip",
+    "package": "npm run build && npm run check:bundles && rm -f claspt-extension-$npm_package_version.zip && (cd dist && zip -r -q ../claspt-extension-$npm_package_version.zip . -x '**/*.map') && ls -lh claspt-extension-$npm_package_version.zip",
+    "package:firefox": "npm run build && npm run check:bundles && node scripts/firefox-manifest.mjs --write && rm -f claspt-extension-firefox-$npm_package_version.zip && (cd dist && zip -r -q ../claspt-extension-firefox-$npm_package_version.zip . -x '**/*.map') && ls -lh claspt-extension-firefox-$npm_package_version.zip",
     "test": "vitest run",
     "test:watch": "vitest",
-    "psl:update": "node scripts/generate-psl.mjs"
+    "psl:update": "node scripts/generate-psl.mjs",
+    "check:bundles": "node scripts/check-bundles.mjs"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

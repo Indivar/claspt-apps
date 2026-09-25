@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Claspt \u2014 Password Auto-Fill",
-  "version": "3.1.0",
-  "description": "Companion extension for the Claspt desktop password manager \u2014 auto-fills credentials on web pages from your local vault.",
+  "name": "Claspt — Password Auto-Fill",
+  "version": "3.1.1",
+  "description": "Companion extension for the Claspt desktop password manager — auto-fills credentials on web pages from your local vault.",
   "permissions": [
     "activeTab",
     "storage",
@@ -81,7 +81,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "claspt@indivar.in",
-      "strict_min_version": "115.0"
+      "strict_min_version": "140.0"
     }
   }
 }

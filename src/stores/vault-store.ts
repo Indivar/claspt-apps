@@ -24,6 +24,7 @@
 import { create } from "zustand";
 import { errorMessage } from "@/lib/error-message";
 import * as cmd from "@/lib/commands";
+import type { LockReason } from "@/lib/biometric-prompt";
 import { createLogger } from "@/lib/logger";
 import { useExtensionStore } from "@/stores/extension-store";
 import { useShareStore } from "@/stores/share-store";
@@ -56,6 +57,11 @@ interface VaultStore {
   biometricFailures: number;
   /** Whether the user has unlocked with password this session (for reauth mode). */
   hasUnlockedWithPassword: boolean;
+  /** Why the unlock screen is showing; `null` until the first lock of this
+   *  run. The screen starts the OS biometric prompt by itself only while this
+   *  is `null`: a lock the app performed on its own must not become a prompt
+   *  on top of unrelated work. */
+  lockReason: LockReason;
   /** The tab the unlock screen opens on next, set by a flow that locks the
    *  vault to send the owner somewhere specific (Restore from account). */
   requestedUnlockMode: "unlock" | "create" | "restore" | null;
@@ -106,6 +112,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   biometricMode: "disabled",
   biometricFailures: 0,
   hasUnlockedWithPassword: false,
+  lockReason: null,
   requestedUnlockMode: null,
 
   createVault: async (password, vaultDir) => {
@@ -118,6 +125,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         vaultDir,
         recoveryKey: result.recovery_key,
         loading: false,
+        lockReason: null,
       });
       vaultLog.info("Vault created successfully");
       await get().loadConfig();
@@ -143,6 +151,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         loading: false,
         hasUnlockedWithPassword: true,
         biometricFailures: 0,
+        lockReason: null,
       });
       vaultLog.info("Vault unlocked");
       await get().loadConfig();
@@ -170,12 +179,12 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     }
 
     clearAllDrafts();
-    set({ isUILocked: true, error: null });
+    set({ isUILocked: true, error: null, lockReason: reason ?? "manual" });
   },
 
   uiLock: () => {
     clearAllDrafts();
-    set({ isUILocked: true, error: null });
+    set({ isUILocked: true, error: null, lockReason: "manual" });
   },
 
   uiUnlock: async (password: string) => {
@@ -183,7 +192,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       await cmd.verifyPassword(password);
       // Reset activity timer so key-lock watchdog doesn't fire immediately
       await cmd.touchActivity();
-      set({ isUILocked: false, error: null });
+      set({ isUILocked: false, error: null, lockReason: null });
       vaultLog.info("UI unlocked");
       return true;
     } catch (e) {
@@ -257,7 +266,13 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         vaultLog.info("Biometric verify for UI unlock");
         await cmd.biometricVerify();
         await cmd.touchActivity();
-        set({ isUILocked: false, loading: false, error: null, biometricFailures: 0 });
+        set({
+          isUILocked: false,
+          loading: false,
+          error: null,
+          biometricFailures: 0,
+          lockReason: null,
+        });
         vaultLog.info("Biometric UI unlock succeeded");
       } else {
         // Full unlock — retrieve key from keychain and initialize subsystems
@@ -269,6 +284,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
           vaultDir,
           loading: false,
           biometricFailures: 0,
+          lockReason: null,
         });
         vaultLog.info("Biometric unlock succeeded");
         await get().loadConfig();
@@ -322,6 +338,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         vaultDir,
         recoveryKey: result.recovery_key,
         loading: false,
+        lockReason: null,
         hasUnlockedWithPassword: true,
       });
       vaultLog.info("Vault recovered successfully");

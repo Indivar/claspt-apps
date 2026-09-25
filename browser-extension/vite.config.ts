@@ -6,6 +6,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { copyFileSync, mkdirSync, existsSync } from "fs";
+import { noHtmlInjection } from "./scripts/no-html-injection.mjs";
 
 /**
  * Vite config for Claspt browser extension.
@@ -18,6 +19,7 @@ import { copyFileSync, mkdirSync, existsSync } from "fs";
 export default defineConfig({
   base: "./",
   plugins: [
+    noHtmlInjection(),
     react(),
     tailwindcss(),
     {

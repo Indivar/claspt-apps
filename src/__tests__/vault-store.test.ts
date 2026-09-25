@@ -252,4 +252,28 @@ describe("useVaultStore", () => {
     useVaultStore.getState().clearRecoveryKey();
     expect(useVaultStore.getState().recoveryKey).toBeNull();
   });
+
+  it("records why the vault locked, and forgets it on unlock", async () => {
+    mockCmd.unlockVault.mockResolvedValue(undefined);
+    mockCmd.getVaultConfig.mockResolvedValue(fakeConfig);
+    await useVaultStore.getState().unlock("pw", "/vault");
+    expect(useVaultStore.getState().lockReason).toBeNull();
+
+    // The idle lock: the app locked on its own.
+    mockCmd.lockVault.mockResolvedValue(undefined);
+    await useVaultStore.getState().lock("auto");
+    expect(useVaultStore.getState().lockReason).toBe("auto");
+
+    // Unlocking clears it, so the next cold start may prompt again.
+    mockCmd.biometricVerify.mockResolvedValue(undefined);
+    mockCmd.touchActivity.mockResolvedValue(undefined);
+    await useVaultStore.getState().unlockWithBiometric("/vault");
+    expect(useVaultStore.getState().lockReason).toBeNull();
+
+    // A lock with no reason given is one the person asked for.
+    await useVaultStore.getState().lock();
+    expect(useVaultStore.getState().lockReason).toBe("manual");
+    useVaultStore.getState().uiLock();
+    expect(useVaultStore.getState().lockReason).toBe("manual");
+  });
 });
