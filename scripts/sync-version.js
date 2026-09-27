@@ -13,6 +13,7 @@
 import { readFileSync, writeFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { readOpenapiVersion, writeOpenapiVersion } from "./openapi-version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -59,16 +60,14 @@ if (currentMatch && currentMatch[0] !== `version = "${version}"`) {
 // 5. Sync the OpenAPI document, whose info.version names the app it describes.
 // A test holds the two together, so a bump that forgets this line fails CI.
 const openapiPath = resolve(root, "docs/api/openapi.yaml");
-let openapi = readFileSync(openapiPath, "utf-8");
-const openapiVersionRe = /^(info:\n(?:  .*\n)*?  version: )([^\n]*)$/m;
-const openapiMatch = openapi.match(openapiVersionRe);
-if (openapiMatch && openapiMatch[2] !== version) {
-  openapi = openapi.replace(openapiVersionRe, `$1${version}`);
-  writeFileSync(openapiPath, openapi);
-  console.log(`synced docs/api/openapi.yaml → ${version}`);
-} else if (!openapiMatch) {
+const openapi = readFileSync(openapiPath, "utf-8");
+const stated = readOpenapiVersion(openapi);
+if (stated === null) {
   console.error("docs/api/openapi.yaml: no info.version line found");
   process.exit(1);
+} else if (stated !== version) {
+  writeFileSync(openapiPath, writeOpenapiVersion(openapi, version));
+  console.log(`synced docs/api/openapi.yaml → ${version}`);
 } else {
   console.log(`docs/api/openapi.yaml already at ${version}`);
 }
