@@ -2,7 +2,6 @@
 // Licensed under the PolyForm Shield License 1.0.0. See LICENSE in the repository root.
 
 import { describe, expect, it } from "vitest";
-// @ts-expect-error a plain ES module script without a declaration file
 import {
   readOpenapiVersion,
   writeOpenapiVersion,
