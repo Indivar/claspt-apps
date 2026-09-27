@@ -33,6 +33,12 @@ export interface PageMeta {
   folder: string;
   encrypted: boolean;
   /**
+   * Fully encrypted because the body holds a recognisable credential outside
+   * a secret block, not because the owner chose it. The desktop clears it on
+   * the first save that finds none.
+   */
+  auto_encrypted?: boolean;
+  /**
    * Frontmatter lines this reader does not model (agent_ns, ttl_hours,
    * written_by_client, ...), kept verbatim so a save from any client leaves
    * another client's metadata exactly as it found it.

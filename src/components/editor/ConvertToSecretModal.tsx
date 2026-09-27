@@ -4,21 +4,25 @@
 /**
  * Modal that converts a block of selected editor text into `:::secret` block(s).
  *
- * It runs `detectCredentials()` over the selection to recognize credential-shaped
- * data (key/value pairs, ASCII/markdown tables, env `KEY=value`, `user/pass`
- * login lines), lets the user pick which detected items to include and whether to
+ * It runs `detectCredentials()` over the selection to read its fields (key/value
+ * pairs, ASCII/markdown tables, env `KEY=value`, `user/pass` login lines), every
+ * one of them, lets the user untick any and choose whether to
  * emit a single combined secret or one per credential, then hands the generated
  * markdown back via `onConvert`. Detection and block generation happen entirely
  * client-side as plaintext markdown; the values are encrypted later, on save, by
  * the backend secret pipeline. This component performs no encryption itself.
  */
 import { useState, useMemo } from "react";
-import { detectCredentials, generateSecretBlocks } from "@/lib/credential-detector";
+import {
+  detectCredentials,
+  generateSecretBlocks,
+  type DetectedCredential,
+} from "@/lib/credential-detector";
 
 interface ConvertToSecretModalProps {
   selectedText: string;
   suggestedLabel: string;
-  onConvert: (secretBlocks: string) => void;
+  onConvert: (secretBlocks: string, converted: DetectedCredential[]) => void;
   onClose: () => void;
 }
 
@@ -60,7 +64,7 @@ export function ConvertToSecretModal({
 
   function handleConvert() {
     if (activeCredentials.length === 0) return;
-    onConvert(preview);
+    onConvert(preview, activeCredentials);
   }
 
   const sourceIcon: Record<string, string> = {
@@ -81,12 +85,11 @@ export function ConvertToSecretModal({
       >
         <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-2xl">
           <h2 className="text-[15px] font-semibold text-text-primary mb-2">
-            No Credentials Detected
+            No fields found
           </h2>
           <p className="text-[13px] text-text-muted mb-4 leading-relaxed">
-            Could not find any credential patterns in the selected text. Supported
-            formats: key-value pairs, ASCII tables, env variables, and email/password
-            lines.
+            The selection has no Key: Value lines, tables, KEY=value lines or user /
+            password lines to put in a secret.
           </p>
           <div className="rounded-lg bg-surface-raised p-3 max-h-32 overflow-auto mb-4">
             <pre className="text-[11px] text-text-dim whitespace-pre-wrap break-all">
@@ -123,7 +126,7 @@ export function ConvertToSecretModal({
                 Convert to Secret{detected.length > 1 ? "s" : ""}
               </h2>
               <p className="mt-0.5 text-[11px] text-text-muted">
-                {detected.length} credential{detected.length !== 1 ? "s" : ""} detected
+                {detected.length} field{detected.length !== 1 ? "s" : ""} in the selection
               </p>
             </div>
             <button

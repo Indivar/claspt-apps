@@ -16,8 +16,8 @@ describe("drafts", () => {
   it("refuses to draft a full-body-encrypted page", () => {
     // The redaction pass only removes `:::secret` fences, so for these pages it
     // removes nothing at all and the entire decrypted body would be stored.
-    expect(canPersistDraft({ meta: { encrypted: true } })).toBe(false);
-    expect(canPersistDraft({ meta: { encrypted: false } })).toBe(true);
+    expect(canPersistDraft({ meta: { encrypted: true } }, false)).toBe(false);
+    expect(canPersistDraft({ meta: { encrypted: false } }, false)).toBe(true);
   });
 
   it("removes every draft on lock and leaves other storage alone", () => {

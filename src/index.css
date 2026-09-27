@@ -2102,3 +2102,13 @@ select option {
     transition: none;
   }
 }
+
+/* A fully encrypted page reads as different from the first pixel: the title
+   bar leans toward the accent, and the band under it says why. */
+.editor-sealed .editor-titlebar {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-accent) 7%, var(--color-surface)) 0%,
+    color-mix(in srgb, var(--color-accent) 3%, var(--color-surface)) 100%
+  );
+}

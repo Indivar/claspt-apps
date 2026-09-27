@@ -63,6 +63,8 @@ interface PagesStore {
   loading: boolean;
   /** Error message. */
   error: string | null;
+  /** What the inspector says under Version History after a scrub; null when nothing. */
+  historyNotice: string | null;
   /** Whether to show archived pages in the sidebar. */
   showArchived: boolean;
   /** All folder paths (including nested), e.g. ["credentials", "credentials/work", "general"]. */
@@ -123,6 +125,7 @@ interface PagesStore {
   toggleEncryption: (path: string) => Promise<void>;
   closePage: () => void;
   clearError: () => void;
+  setHistoryNotice: (notice: string | null) => void;
   loadFolders: () => Promise<void>;
   createFolder: (name: string) => Promise<string | null>;
   renameFolder: (oldName: string, newName: string) => Promise<boolean>;
@@ -139,6 +142,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
   selectionMode: false,
   loading: false,
   error: null,
+  historyNotice: null,
   showArchived: false,
   folders: [],
   activePageExternalRev: 0,
@@ -494,6 +498,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
 
   closePage: () => set({ activePage: null }),
   clearError: () => set({ error: null }),
+  setHistoryNotice: (notice) => set({ historyNotice: notice }),
 
   loadFolders: async () => {
     try {

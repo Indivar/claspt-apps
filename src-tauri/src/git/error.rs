@@ -26,6 +26,10 @@ pub enum GitError {
     /// A `Mutex` guarding batch-commit state was poisoned by a panic in another thread.
     #[error("internal lock error")]
     LockPoisoned,
+
+    /// A rebuilt history did not describe the files on disk; the old history was kept.
+    #[error("the new history does not match the pages on disk; the old history was kept")]
+    ResetVerificationFailed,
 }
 
 impl serde::Serialize for GitError {

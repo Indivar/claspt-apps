@@ -14,6 +14,8 @@ use super::crypto::VaultState;
 use crate::git::batch::BatchCommitter;
 use crate::git::error::GitError;
 use crate::git::ops::{self, CommitDiff, CommitEntry};
+use crate::git::reset;
+use crate::git::scrub::{self, ScrubOutcome};
 
 /// Holds the batch committer in Tauri managed state.
 pub struct GitState {
@@ -40,6 +42,9 @@ pub fn record_save_if_active(title: &str, git_state: &State<GitState>) {
 
 /// Initialize git state when vault is opened.
 pub fn init_git_state(vault_dir: &std::path::Path, git_state: &GitState) {
+    if let Err(e) = reset::recover_interrupted_reset(vault_dir) {
+        log::warn!("[git] could not undo an interrupted history reset: {e}");
+    }
     git_state.batcher.set_vault_dir(vault_dir);
 }
 
@@ -56,6 +61,39 @@ pub fn git_commit(
 ) -> Result<Option<String>, GitError> {
     let _vault_dir = get_vault_dir(&vault_state)?;
     git_state.batcher.flush()
+}
+
+/// Start version history afresh from the pages as they are now. Every earlier
+/// version is removed from this device; the pages are not touched.
+#[tauri::command]
+pub fn git_reset_history(
+    vault_state: State<VaultState>,
+    git_state: State<GitState>,
+) -> Result<String, GitError> {
+    let vault_dir = get_vault_dir(&vault_state)?;
+    // Pending edits go into the old history first, so the new one starts
+    // from a disk that git already describes.
+    git_state.batcher.flush()?;
+    let _history = git_state.batcher.history_lock();
+    reset::reset_history(&vault_dir)
+}
+
+/// Remove values that have just become secrets from the recent versions of
+/// a page. The values arrive over IPC and are never logged; see `git::scrub`
+/// for what is rewritten and what is refused.
+#[tauri::command]
+pub fn git_scrub_page_history(
+    path: String,
+    values: Vec<String>,
+    vault_state: State<VaultState>,
+    git_state: State<GitState>,
+) -> Result<ScrubOutcome, GitError> {
+    let vault_dir = get_vault_dir(&vault_state)?;
+    // A save still waiting for its commit may hold the value; it is committed
+    // first so the scrub sees it in the tail.
+    git_state.batcher.flush()?;
+    let _history = git_state.batcher.history_lock();
+    scrub::scrub_tail(&vault_dir, &path, &values)
 }
 
 /// Get commit history for the vault.

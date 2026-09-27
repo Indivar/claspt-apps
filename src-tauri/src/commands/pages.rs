@@ -15,11 +15,13 @@ use zeroize::Zeroizing;
 use super::crypto::VaultState;
 use super::git::{record_save_if_active, GitState};
 use super::search::{index_page_if_active, remove_page_if_active, SearchState};
+use crate::pages::at_rest;
 use crate::pages::crud;
 use crate::pages::error::PageError;
 use crate::pages::media::{self, MediaFile};
 use crate::pages::model::{Page, PageSummary, SecretSummary};
 use crate::pages::secret;
+use crate::pages::secret_guard;
 use crate::pages::trash;
 
 fn get_vault_dir(state: &State<VaultState>) -> Result<std::path::PathBuf, PageError> {
@@ -50,23 +52,6 @@ fn validate_source_path(source_path: &std::path::Path) -> Result<(), PageError> 
     )))
 }
 
-/// Encrypt page content before writing to disk.
-///
-/// If `encrypted` is true, the entire body is encrypted as a single blob.
-/// Otherwise, only secret blocks within `:::secret[...]:::` fences are encrypted.
-fn encrypt_content(
-    content: &str,
-    encrypted: bool,
-    state: &State<VaultState>,
-) -> Result<String, PageError> {
-    let key = get_master_key(state)?;
-    if encrypted {
-        secret::encrypt_full_body(content, &key)
-    } else {
-        secret::encrypt_secrets(content, &key)
-    }
-}
-
 /// Decrypt page content after reading from disk.
 ///
 /// If `meta.encrypted` is true, the body is decrypted as a single blob.
@@ -95,15 +80,14 @@ pub fn create_page(
     git_state: State<GitState>,
 ) -> Result<Page, PageError> {
     let vault_dir = get_vault_dir(&state)?;
-    let encrypted_content = encrypt_content(&content, false, &state)?;
-    let mut page = crud::create_page(&vault_dir, &title, &folder, &encrypted_content, false)?;
+    let key = get_master_key(&state)?;
+    let created = crud::create_page(&vault_dir, &title, &folder, "", false)?;
+    // The at-rest form follows the content: see pages::at_rest.
+    let page = at_rest::store(&vault_dir, &created.path, &content, false, &key)?;
     // Index with plaintext content for search
-    page.content = content.clone();
     index_page_if_active(&page, &search_state);
     // Record save for batched git commit
     record_save_if_active(&title, &git_state);
-    // Return plaintext content to the frontend
-    page.content = content;
     Ok(page)
 }
 
@@ -128,17 +112,16 @@ pub fn update_page(
     git_state: State<GitState>,
 ) -> Result<Page, PageError> {
     let vault_dir = get_vault_dir(&state)?;
-    // Read current page to check encryption state
+    let key = get_master_key(&state)?;
+    // Full encryption the owner chose is kept; full encryption the content
+    // earned is decided afresh on every save. See pages::at_rest.
     let current = crud::read_page(&vault_dir, &path)?;
-    let encrypted_content = encrypt_content(&content, current.meta.encrypted, &state)?;
-    let mut page = crud::update_page(&vault_dir, &path, &encrypted_content)?;
+    let chosen = current.meta.encrypted && !current.meta.auto_encrypted;
+    let page = at_rest::store(&vault_dir, &path, &content, chosen, &key)?;
     // Index with plaintext content for search (encrypted pages get empty content)
-    page.content = content.clone();
     index_page_if_active(&page, &search_state);
     // Record save for batched git commit
     record_save_if_active(&page.meta.title, &git_state);
-    // Return plaintext content to the frontend
-    page.content = content;
     Ok(page)
 }
 
@@ -484,18 +467,11 @@ pub async fn toggle_encryption(
             secret::decrypt_secrets(&raw_page.content, &key)?
         };
 
-        // 3. Re-encrypt with the new mode
-        let new_encrypted = !was_encrypted;
-        let new_content = if new_encrypted {
-            secret::encrypt_full_body(&plaintext, &key)?
-        } else {
-            secret::encrypt_secrets(&plaintext, &key)?
-        };
-
-        // 4. Write with updated meta
-        let page = crud::update_page_with_meta(&vault_dir, &path, &new_content, |meta| {
-            meta.encrypted = new_encrypted;
-        })?;
+        // 3. The new mode. A page the owner chose to encrypt becomes plain,
+        // unless a bare credential in it keeps it sealed; any other page,
+        // including one sealed automatically, becomes chosen.
+        let was_chosen = was_encrypted && !raw_page.meta.auto_encrypted;
+        let page = at_rest::store(&vault_dir, &path, &plaintext, !was_chosen, &key)?;
 
         Ok::<_, PageError>((page, plaintext))
     })
@@ -516,6 +492,14 @@ pub async fn toggle_encryption(
         content: plaintext,
         path: page.path,
     })
+}
+
+/// Where `content` holds what looks like a credential outside a secret block:
+/// the kind and the 1-based line, never the value. The editor asks after a save
+/// and after a paste, to say why a page is sealed and which lines to convert.
+#[tauri::command]
+pub fn plaintext_secret_findings(content: String) -> Vec<secret_guard::PlaintextFinding> {
+    secret_guard::find_plaintext_secrets(&content)
 }
 
 // ── Media ──────────────────────────────────────────────

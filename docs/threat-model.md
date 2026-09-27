@@ -87,6 +87,45 @@ Last reviewed: 2026-09-09, against desktop 3.3.x.
 | Another local user on the same machine | Cannot read `.securenotes/` or the API config files: owner-only on macOS, Linux and Windows. |
 | Malware running as you on an unlocked machine | **Out of scope.** It can read the keychain and the vault the same way Claspt does. No local password manager defends against this. |
 
+## Plaintext at rest
+
+A save reaches five places: the file on disk, the vault's git history, the
+sync server, every other synced device, and any backup that copies the
+folder. A credential pasted into a page as plain text would reach all five in
+the seconds before it is converted into a secret block, and git would keep it
+for good. Since 4.1.9 the rule is:
+
+- **The at-rest form of a page follows its content.** On every save, from
+  every writer, a body that holds a recognisable credential outside a
+  `:::secret` block is written fully encrypted and flagged `auto_encrypted`
+  in its front matter. The first save that finds none writes it plain again,
+  with only its blocks sealed. The recogniser is the same one the local API's
+  write guard uses (`pages::secret_guard`): known token shapes, and
+  password-like keys with generated-looking values. It is deliberately
+  conservative, so ordinary notes are never sealed by it.
+- A page the owner chose to encrypt is never unsealed by this rule. Turning
+  encryption off on a page that still holds a bare credential leaves it
+  sealed, automatically, and the editor says why.
+- **The editor shows it.** A sticky band under the title names the state in
+  one sentence, the title bar leans toward the accent, a faint lock sits
+  behind the text, and the sidebar marks the page. On a page sealed
+  automatically the band's one button selects the flagged lines and opens
+  the convert dialog. A paste that brings in flagged lines gets the same
+  offer before the first autosave. The crash-recovery draft in browser
+  storage is not written while the buffer holds a flagged line.
+- **What is already in history.** Settings offers to reset version history:
+  a new repository is built from the pages on disk, checked to describe them
+  exactly, and only then does the old one go; the pages are never written
+  to. After a conversion, the app also rewrites the recent run of versions
+  that held the converted value, and only that run: a value in a version
+  older than a day, in more than thirty versions, beyond a gap or beyond a
+  merge is left where it is and the inspector says so.
+
+What remains: a value the recogniser does not recognise stays plain until it
+is converted, and a backup taken in that window keeps it. Each synced device
+keeps its own history, so the reset is run per device. The phone is read-only
+and has no history of its own.
+
 ## Not protected, by design
 
 - **Note text, titles, secret labels, folder names, tags, frontmatter.** Plain

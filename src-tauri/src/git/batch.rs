@@ -38,6 +38,10 @@ const IDLE_FLUSH_TICK: Duration = Duration::from_millis(500);
 pub struct BatchCommitter {
     state: Arc<Mutex<BatchState>>,
     stop: Arc<AtomicBool>,
+    /// Held around every commit, and by the history tools (reset, scrub) for
+    /// as long as they work, so a commit never lands on a repository that is
+    /// being swapped or rewritten.
+    history: Arc<Mutex<()>>,
 }
 
 struct BatchState {
@@ -64,9 +68,11 @@ impl BatchCommitter {
             pending: false,
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        let history = Arc::new(Mutex::new(()));
 
         let timer_state = Arc::clone(&state);
         let timer_stop = Arc::clone(&stop);
+        let timer_history = Arc::clone(&history);
         let _ = std::thread::Builder::new()
             .name("git-batch-flush".into())
             .spawn(move || {
@@ -95,6 +101,7 @@ impl BatchCommitter {
                         Some((vd, title))
                     };
                     if let Some((vd, title)) = commit_info {
+                        let _history = timer_history.lock().unwrap_or_else(|e| e.into_inner());
                         if let Err(e) = ops::commit_changes(&vd, &title) {
                             log::warn!("[git-batch] idle flush failed: {e}");
                         }
@@ -102,7 +109,18 @@ impl BatchCommitter {
                 }
             });
 
-        Self { state, stop }
+        Self {
+            state,
+            stop,
+            history,
+        }
+    }
+
+    /// Exclusive use of the repository for a history tool. Every commit path
+    /// takes this lock too, so a pending commit finishes before the tool starts
+    /// and none starts until it is done.
+    pub fn history_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.history.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Set the vault directory (called on vault unlock).
@@ -137,6 +155,7 @@ impl BatchCommitter {
         };
         // Perform git I/O outside the lock
         if let Some((vault_dir, title)) = commit_info {
+            let _history = self.history_lock();
             let _ = ops::commit_changes(&vault_dir, &title);
         }
     }
@@ -180,6 +199,7 @@ impl BatchCommitter {
 
         // Perform git I/O outside the lock
         let flushed_oid = if let Some((vault_dir, last_title)) = commit_info {
+            let _history = self.history_lock();
             ops::commit_changes(&vault_dir, &last_title)?
         } else {
             None
@@ -209,6 +229,7 @@ impl BatchCommitter {
         }; // lock released here
 
         let (vault_dir, title) = commit_info;
+        let _history = self.history_lock();
         let oid = ops::commit_changes(&vault_dir, &title)?;
         Ok(oid)
     }

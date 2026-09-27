@@ -143,6 +143,16 @@ export function updatePage(path: string, content: string): Promise<Page> {
   return invoke("update_page", { path, content });
 }
 
+/** Where content holds what looks like a credential outside a secret block: the kind and the 1-based line, never the value. */
+export interface PlaintextFinding {
+  kind: string;
+  line: number;
+}
+
+export function plaintextSecretFindings(content: string): Promise<PlaintextFinding[]> {
+  return invoke("plaintext_secret_findings", { content });
+}
+
 /** A page in the vault's trash. */
 export interface TrashEntry {
   id: string;
@@ -419,6 +429,25 @@ export function gitFileAtCommit(oid: string, path: string): Promise<string | nul
 
 export function gitCommitDiff(oid: string, path: string): Promise<CommitDiff> {
   return invoke("git_commit_diff", { oid, path });
+}
+
+/** What the tail scrub did with the recent versions of a page. */
+export type ScrubOutcome =
+  | { kind: "clean" }
+  | { kind: "rewrote"; commits: number; remaining_objects: number }
+  | { kind: "left_in_history"; reason: string };
+
+/** Remove values that just became secrets from the recent versions of a page. */
+export function gitScrubPageHistory(
+  path: string,
+  values: string[],
+): Promise<ScrubOutcome> {
+  return invoke("git_scrub_page_history", { path, values });
+}
+
+/** Start version history afresh from the pages as they are now; returns the id of the one version left. */
+export function gitResetHistory(): Promise<string> {
+  return invoke("git_reset_history");
 }
 
 export function gitRestoreToCommit(oid: string, path: string): Promise<string> {

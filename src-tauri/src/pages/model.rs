@@ -31,6 +31,11 @@ pub struct PageMeta {
     pub folder: String,
     #[serde(default)]
     pub encrypted: bool,
+    /// Fully encrypted because the body holds a recognisable credential
+    /// outside a secret block, not because the owner chose it. Cleared by the
+    /// first save that finds none. See `pages::at_rest`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_encrypted: bool,
     /// Agent namespace for memory pages (e.g. "claude-code").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_ns: Option<String>,
@@ -239,6 +244,7 @@ mod tests {
             tags: vec!["tag1".to_string()],
             folder: "general".to_string(),
             encrypted: false,
+            auto_encrypted: false,
             agent_ns: None,
             memory_type: None,
             ttl_hours: None,

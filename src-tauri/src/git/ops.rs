@@ -55,8 +55,12 @@ pub(crate) fn unstage_device_local(index: &mut git2::Index) {
             // there and may be a plaintext credential file. gitignore keeps
             // new vaults clean; this keeps a vault whose ignore file predates
             // the rule from committing it.
-            (path.starts_with(".securenotes/") || path.starts_with(".inbox/"))
-                .then(|| PathBuf::from(path))
+            // `.git.old/` is the old history waiting beside the vault while a
+            // reset builds and checks the new one; it is never content.
+            (path.starts_with(".securenotes/")
+                || path.starts_with(".inbox/")
+                || path.starts_with(".git.old/"))
+            .then(|| PathBuf::from(path))
         })
         .collect();
 

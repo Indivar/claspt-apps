@@ -224,7 +224,11 @@ function EncryptionToggle({ page }: { page: Page }) {
         <div className="flex items-center gap-2">
           {isEncrypted ? <LockClosedIcon size={14} /> : <LockOpenIcon size={14} />}
           <span className="text-[11px] font-medium text-text-primary">
-            {isEncrypted ? "Entire body encrypted" : "Only secret blocks encrypted"}
+            {page.meta.auto_encrypted
+              ? "Encrypted while it holds credentials"
+              : isEncrypted
+                ? "Entire body encrypted"
+                : "Only secret blocks encrypted"}
           </span>
         </div>
         <div
@@ -257,6 +261,7 @@ function InspectorContent({ page }: { page: Page }) {
   const { activePage, openPage } = usePagesStore();
   const { setInspectorOpen } = useUIStore();
   const [history, setHistory] = useState<CommitEntry[]>([]);
+  const historyNotice = usePagesStore((s) => s.historyNotice);
   const [allTags, setAllTags] = useState<string[]>([]);
   const [diffOid, setDiffOid] = useState<string | null>(null);
   const [restoringOid, setRestoringOid] = useState<string | null>(null);
@@ -347,6 +352,11 @@ function InspectorContent({ page }: { page: Page }) {
 
         <div data-tour="git-history">
           <SectionLabel title="Version History" />
+          {historyNotice && (
+            <p className="mb-1.5 rounded-md bg-accent/10 px-2 py-1.5 text-[10px] leading-relaxed text-text-secondary">
+              {historyNotice}
+            </p>
+          )}
           {history.length === 0 ? (
             <p className="py-3 text-center text-[11px] text-text-muted/60">
               No commits yet

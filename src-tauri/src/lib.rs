@@ -88,8 +88,8 @@ use commands::generator::{
     generate_passphrase, generate_password, generate_pin, generate_uuid,
 };
 use commands::git::{
-    git_commit, git_commit_diff, git_file_at_commit, git_file_log, git_log, git_restore_to_commit,
-    GitState,
+    git_commit, git_commit_diff, git_file_at_commit, git_file_log, git_log, git_reset_history,
+    git_restore_to_commit, git_scrub_page_history, GitState,
 };
 use commands::import::{
     detect_csv_columns, execute_import, import_markdown_page, preview_import,
@@ -107,7 +107,7 @@ use commands::internal::{
 use commands::pages::{
     create_folder, create_page, delete_folder, delete_media, delete_page, delete_pages_bulk,
     duplicate_page, export_media, list_folders, list_pages, list_secrets, list_tags,
-    media_references, media_usage, move_page, preview_image_transform,
+    media_references, media_usage, move_page, plaintext_secret_findings, preview_image_transform,
     preview_image_transform_bytes, process_and_save_media, process_and_save_media_bytes,
     read_media_data_url, read_page, rename_folder, resolve_media_path, save_media,
     save_media_from_path, set_media_sealed, set_memory_reviewed, stat_source_file, toggle_archive,
@@ -242,6 +242,7 @@ macro_rules! invoke_handlers {
             toggle_archive,
             set_memory_reviewed,
             toggle_encryption,
+            plaintext_secret_findings,
             list_pages,
             list_secrets,
             list_tags,
@@ -274,6 +275,8 @@ macro_rules! invoke_handlers {
             git_file_at_commit,
             git_commit_diff,
             git_restore_to_commit,
+            git_reset_history,
+            git_scrub_page_history,
             detect_csv_columns,
             preview_import,
             execute_import,

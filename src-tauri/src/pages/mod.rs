@@ -23,6 +23,7 @@
 //! vault directory path.
 pub mod agent_memory;
 pub mod agent_secret;
+pub mod at_rest;
 pub mod credential_shape;
 pub mod crud;
 pub mod error;

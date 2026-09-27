@@ -28,8 +28,15 @@ export function draftKeyFor(pageId: string): string {
  * browser storage. Those pages therefore get no draft — losing crash recovery
  * for them is the smaller cost.
  */
-export function canPersistDraft(page: { meta: { encrypted: boolean } }): boolean {
-  return !page.meta.encrypted;
+export function canPersistDraft(
+  page: { meta: { encrypted: boolean } },
+  hasFindings: boolean,
+): boolean {
+  // While the buffer holds what looks like a credential outside a secret
+  // block, the draft is the one copy of it that would sit unencrypted, so
+  // there is none. Crash recovery loses at most the seconds before the next
+  // autosave, which writes the page sealed.
+  return !page.meta.encrypted && !hasFindings;
 }
 
 /**

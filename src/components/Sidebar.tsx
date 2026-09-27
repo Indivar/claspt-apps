@@ -326,7 +326,7 @@ const PageItem = React.memo(function PageItem({
             </svg>
           )}
           {page.meta.encrypted && (
-            <LockClosedIcon size={10} className="shrink-0 text-accent" />
+            <LockClosedIcon size={14} className="shrink-0 text-accent" />
           )}
           <span className="truncate">{page.meta.title}</span>
           {page.meta.archived && (

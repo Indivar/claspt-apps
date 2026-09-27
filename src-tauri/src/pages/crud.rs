@@ -171,6 +171,7 @@ pub fn create_page(
         tags: vec![],
         folder: folder.to_string(),
         encrypted,
+        auto_encrypted: false,
         agent_ns: None,
         memory_type: None,
         ttl_hours: None,

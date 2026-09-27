@@ -21,7 +21,16 @@ import { useVaultStore } from "@/stores/vault-store";
 import { EditorToolbar } from "@/components/editor/EditorToolbar";
 import { SecretBlockRenderer } from "@/components/SecretCard";
 import { LockClosedIcon, LockOpenIcon } from "@/components/ui/icons";
-import { verifyPassword } from "@/lib/commands";
+import {
+  verifyPassword,
+  plaintextSecretFindings,
+  type PlaintextFinding,
+} from "@/lib/commands";
+import { bandFor } from "@/lib/at-rest";
+import { EncryptedBand, SealWatermark } from "@/components/editor/EncryptedBand";
+import { PasteBar } from "@/components/editor/PasteBar";
+import { useConvertStore } from "@/stores/convert-store";
+import { getActiveView } from "@/components/editor/editor-api";
 import { kbd } from "@/lib/platform";
 import { stripSecretValues } from "@/lib/strip-secrets";
 import { draftKeyFor, canPersistDraft } from "@/lib/drafts";
@@ -244,6 +253,16 @@ function PageEditor({ page }: { page: Page }) {
   const savingRef = useRef(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [revealed, setRevealed] = useState(false);
+  // Lines outside a secret block that look like credentials, from the saved
+  // content. They are why an automatically sealed page is sealed, and what
+  // the band's action converts.
+  const [findings, setFindings] = useState<PlaintextFinding[]>([]);
+  // A paste that brought in credential-shaped lines, until converted or dismissed.
+  const [pasteAlert, setPasteAlert] = useState<{
+    from: number;
+    to: number;
+    count: number;
+  } | null>(null);
   const [confirmDeletePage, setConfirmDeletePage] = useState(false);
   const [liveContent, setLiveContent] = useState(page.content);
   const liveContentRef = useRef(page.content);
@@ -256,6 +275,21 @@ function PageEditor({ page }: { page: Page }) {
     const saved = localStorage.getItem(draftKey);
     return saved && saved !== page.content ? saved : null;
   });
+
+  useEffect(() => {
+    let live = true;
+    plaintextSecretFindings(page.content)
+      .then((found) => {
+        if (!live) return;
+        setFindings(found);
+        // The paste was converted or removed: nothing left to point at.
+        if (found.length === 0) setPasteAlert(null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [page.content]);
 
   useEffect(() => {
     const saved = localStorage.getItem(draftKey);
@@ -356,7 +390,7 @@ function PageEditor({ page }: { page: Page }) {
       // encrypted page is skipped outright — stripping secret fences leaves the
       // rest of its decrypted body intact, and for those pages the body IS the
       // protected material.
-      if (canPersistDraft(page)) {
+      if (canPersistDraft(page, findings.length > 0 || pasteAlert !== null)) {
         localStorage.setItem(draftKey, stripSecretValues(value));
       }
       // Auto-save after configured delay of inactivity. "unsaved" means
@@ -371,7 +405,7 @@ function PageEditor({ page }: { page: Page }) {
         if (!savingRef.current) doSave(value);
       }, delay);
     },
-    [config?.auto_save_delay_ms, doSave, draftKey, page],
+    [config?.auto_save_delay_ms, doSave, draftKey, page, findings.length, pasteAlert],
   );
 
   // Listen for Mod+S force-save event from global keyboard handler
@@ -431,7 +465,41 @@ function PageEditor({ page }: { page: Page }) {
 
   // Check if we should show the encrypted overlay
   const displayMode = config?.encrypted_page_display ?? "lock_overlay";
-  const showOverlay = page.meta.encrypted && !revealed && displayMode !== "auto_reveal";
+  // A page sealed automatically is being worked on; hiding it behind the
+  // lock overlay would only get in the way of the conversion it asks for.
+  const showOverlay =
+    page.meta.encrypted &&
+    !page.meta.auto_encrypted &&
+    !revealed &&
+    displayMode !== "auto_reveal";
+  const band = bandFor(page.meta, findings.length);
+
+  const handleTextPasted = useCallback((from: number, to: number, text: string) => {
+    plaintextSecretFindings(text)
+      .then((found) => {
+        if (found.length > 0) setPasteAlert({ from, to, count: found.length });
+      })
+      .catch(() => {});
+  }, []);
+
+  const convertPasted = () => {
+    if (!pasteAlert) return;
+    const view = getActiveView();
+    if (!view) return;
+    const to = Math.min(view.state.doc.length, pasteAlert.to);
+    useConvertStore.getState().requestConvert(Math.min(pasteAlert.from, to), to);
+    setPasteAlert(null);
+  };
+
+  // Select the flagged lines and open the convert dialog on them.
+  const convertFlagged = () => {
+    const view = getActiveView();
+    if (!view || findings.length === 0) return;
+    const doc = view.state.doc;
+    const first = Math.max(1, Math.min(...findings.map((f) => f.line)));
+    const last = Math.min(doc.lines, Math.max(...findings.map((f) => f.line)));
+    useConvertStore.getState().requestConvert(doc.line(first).from, doc.line(last).to);
+  };
 
   if (showOverlay) {
     return (
@@ -470,7 +538,10 @@ function PageEditor({ page }: { page: Page }) {
   }
 
   return (
-    <div data-tour="editor" className="flex flex-1 flex-col overflow-hidden bg-surface">
+    <div
+      data-tour="editor"
+      className={`flex flex-1 flex-col overflow-hidden bg-surface ${page.meta.encrypted ? "editor-sealed" : ""}`}
+    >
       {/* Title Bar */}
       <div className="editor-titlebar flex flex-col border-b border-border px-6 py-3.5">
         <div className="flex items-center">
@@ -633,12 +704,22 @@ function PageEditor({ page }: { page: Page }) {
         </div>
       )}
 
+      {band && <EncryptedBand band={band} onConvert={convertFlagged} />}
+      {pasteAlert && (
+        <PasteBar
+          count={pasteAlert.count}
+          onConvert={convertPasted}
+          onDismiss={() => setPasteAlert(null)}
+        />
+      )}
+
       {/* Editor Toolbar (hidden in preview-only mode) */}
       {editorMode !== "preview" && <EditorToolbar />}
       <AttachDialogHost />
 
       {/* Editor / Preview area */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden">
+        {page.meta.encrypted && <SealWatermark />}
         {(editorMode === "edit" || editorMode === "split") && (
           <div
             className={`relative overflow-hidden ${editorMode === "split" ? "w-1/2 min-w-[300px]" : "w-full"}`}
@@ -652,6 +733,7 @@ function PageEditor({ page }: { page: Page }) {
                 searchHighlight={searchHighlight}
                 onSearchHighlightApplied={clearSearchHighlight}
                 scrollDomRef={cmScrollRef}
+                onTextPasted={handleTextPasted}
               />
             </Suspense>
           </div>

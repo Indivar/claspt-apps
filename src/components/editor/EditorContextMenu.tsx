@@ -15,7 +15,12 @@ import { undo, redo, selectAll } from "@codemirror/commands";
 import { openSearchPanel } from "@codemirror/search";
 import { getActiveView } from "./editor-api";
 import { ConvertToSecretModal } from "./ConvertToSecretModal";
+import { applyConversion, type DetectedCredential } from "@/lib/credential-detector";
 import { copyToClipboard, readFromClipboard } from "@/lib/clipboard";
+import { useConvertStore } from "@/stores/convert-store";
+import { usePagesStore } from "@/stores/pages-store";
+import { gitScrubPageHistory } from "@/lib/commands";
+import { historyNoticeFor, scrubValues } from "@/lib/history-notice";
 
 interface MenuPosition {
   x: number;
@@ -52,6 +57,10 @@ export function EditorContextMenu({ containerRef }: EditorContextMenuProps) {
     to: number;
   } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  // A request from the encrypted-page band or the paste bar: the same dialog,
+  // on the range they name, derived at render time so no effect is needed.
+  const convertRequest = useConvertStore((s) => s.request);
+  const clearRequest = useConvertStore((s) => s.clearRequest);
   const isMac = navigator.platform.includes("Mac");
   const mod = isMac ? "⌘" : "Ctrl+";
 
@@ -151,27 +160,59 @@ export function EditorContextMenu({ containerRef }: EditorContextMenuProps) {
       close();
       return;
     }
-    const { from, to } = view.state.selection.main;
+    // Fields are whole lines, so the selection is widened to whole lines;
+    // the lines that are not converted come back untouched.
+    const { main } = view.state.selection;
+    const from = view.state.doc.lineAt(main.from).from;
+    const endLine = view.state.doc.lineAt(main.to);
+    const to = main.to === endLine.from && main.to > from ? main.to : endLine.to;
     const text = view.state.sliceDoc(from, to);
     const label = suggestLabel();
     setConvertModal({ text, label, from, to });
     close();
   }, [close]);
 
+  const requestedModal = (() => {
+    if (!convertRequest) return null;
+    const view = getActiveView();
+    if (!view) return null;
+    const from = Math.max(0, convertRequest.from);
+    const to = Math.min(view.state.doc.length, convertRequest.to);
+    return { text: view.state.sliceDoc(from, to), label: suggestLabel(), from, to };
+  })();
+  const activeModal = convertModal ?? requestedModal;
+
+  const closeConvertModal = useCallback(() => {
+    setConvertModal(null);
+    clearRequest();
+  }, [clearRequest]);
+
   const handleConvertComplete = useCallback(
-    (secretBlocks: string) => {
-      if (!convertModal) return;
+    (secretBlocks: string, converted: DetectedCredential[]) => {
+      if (!activeModal) return;
       const view = getActiveView();
       if (!view) return;
-      const { from, to } = convertModal;
+      const { from, to, text } = activeModal;
+      const replacement = applyConversion(text, converted, secretBlocks);
       view.dispatch({
-        changes: { from, to, insert: secretBlocks },
-        selection: { anchor: from + secretBlocks.length },
+        changes: { from, to, insert: replacement },
+        selection: { anchor: from + replacement.length },
       });
       view.focus();
-      setConvertModal(null);
+      closeConvertModal();
+      // The values just became secrets; the recent versions of the page may
+      // still hold them in plain text. The outcome goes to the inspector.
+      const values = scrubValues(converted.map((c) => c.value));
+      const path = usePagesStore.getState().activePage?.path;
+      if (values.length > 0 && path) {
+        gitScrubPageHistory(path, values)
+          .then((outcome) =>
+            usePagesStore.getState().setHistoryNotice(historyNoticeFor(outcome)),
+          )
+          .catch(() => {});
+      }
     },
-    [convertModal],
+    [activeModal, closeConvertModal],
   );
 
   const items: MenuEntry[] = [
@@ -320,12 +361,12 @@ export function EditorContextMenu({ containerRef }: EditorContextMenuProps) {
         </div>
       )}
 
-      {convertModal && (
+      {activeModal && (
         <ConvertToSecretModal
-          selectedText={convertModal.text}
-          suggestedLabel={convertModal.label}
+          selectedText={activeModal.text}
+          suggestedLabel={activeModal.label}
           onConvert={handleConvertComplete}
-          onClose={() => setConvertModal(null)}
+          onClose={closeConvertModal}
         />
       )}
     </>

@@ -33,7 +33,14 @@ type UtilityState<T> =
 
 /** Identifies which utility panel is currently shown. */
 export type UtilityId =
-  "stats" | "health" | "duplicates" | "consolidate" | "tags" | "breach" | "trash";
+  | "stats"
+  | "health"
+  | "duplicates"
+  | "consolidate"
+  | "tags"
+  | "breach"
+  | "trash"
+  | "history";
 
 /** Human-readable byte size (B / KB / MB). */
 function formatBytes(bytes: number): string {
@@ -577,6 +584,90 @@ function BreachPanel({
  * Delete now for each and Empty trash for all. Entries older than the
  * retention set under Settings › Editor go when the vault is unlocked.
  */
+/**
+ * Version history: start it afresh from the pages as they are now. The pages
+ * are files and are never touched; only the record of their past goes.
+ */
+function HistoryPanel() {
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<
+    { ok: true; oid: string } | { ok: false; error: string } | null
+  >(null);
+
+  async function reset() {
+    setBusy(true);
+    try {
+      const oid = await cmd.gitResetHistory();
+      setResult({ ok: true, oid });
+    } catch (e) {
+      setResult({ ok: false, error: errorMessage(e) });
+    } finally {
+      setBusy(false);
+      setConfirm(false);
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-lg font-semibold text-text-primary">Version History</h2>
+      <p className="mt-1 text-[13px] text-text-muted">
+        Every save is kept as a version, so an earlier state of any page is one click away
+        in the inspector. Resetting starts that record afresh from the pages as they are
+        now.
+      </p>
+      <div className="mt-4 rounded-xl border border-border/60 bg-surface p-4">
+        <h3 className="text-[13px] font-medium text-text-primary">
+          Reset version history
+        </h3>
+        <p className="mt-1 text-[12px] leading-relaxed text-text-muted">
+          Use it when a credential sat in a page in plain text before it was made a
+          secret: the earlier versions still hold it. Every earlier version is removed
+          from this device and history starts again with one version, the present. Your
+          pages are not changed. Other devices keep their own history until this is run
+          there too.
+        </p>
+        <div className="mt-3 flex items-center gap-2">
+          {confirm ? (
+            <>
+              <span className="text-[12px] text-text-secondary">
+                Remove every earlier version?
+              </span>
+              <button
+                onClick={() => void reset()}
+                disabled={busy}
+                className="rounded-lg bg-danger px-3 py-1 text-[12px] font-medium text-white disabled:opacity-50"
+              >
+                {busy ? "Resetting…" : "Reset history"}
+              </button>
+              <button
+                onClick={() => setConfirm(false)}
+                disabled={busy}
+                className="rounded-lg px-3 py-1 text-[12px] text-text-secondary hover:bg-surface-overlay"
+              >
+                Keep
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setConfirm(true)}
+              className="rounded-lg border border-border/60 px-3 py-1 text-[12px] text-text-secondary transition-all hover:border-danger hover:text-danger"
+            >
+              Reset version history…
+            </button>
+          )}
+        </div>
+        {result?.ok === true && (
+          <p className="mt-3 text-[12px] text-success">
+            Done. History now has one version, {result.oid.slice(0, 7)}.
+          </p>
+        )}
+        {result?.ok === false && <ErrorMsg error={result.error} />}
+      </div>
+    </div>
+  );
+}
+
 function TrashPanel() {
   const [entries, setEntries] = useState<TrashEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -850,6 +941,7 @@ export function UtilitiesTab({ activeUtility }: { activeUtility: UtilityId }) {
       )}
       {activeUtility === "breach" && <BreachPanel state={breach} onRun={runBreach} />}
       {activeUtility === "trash" && <TrashPanel />}
+      {activeUtility === "history" && <HistoryPanel />}
       {consolidateOpen && <ConsolidateDialog onClose={() => setConsolidateOpen(false)} />}
     </>
   );

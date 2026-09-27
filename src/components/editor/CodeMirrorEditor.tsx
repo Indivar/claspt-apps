@@ -49,6 +49,7 @@ import { useExtensionStore } from "@/stores/extension-store";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { toast } from "sonner";
 import { errorMessage } from "@/lib/error-message";
+import { insertedRange } from "@/lib/paste-range";
 import { ATTACHMENT_MIME_TYPES, extOf, isAttachmentExt } from "@/lib/attachments";
 import { nextDropTarget } from "@/lib/drop-target";
 import { sourceFromFile, sourceFromPath, useAttachStore } from "@/stores/attach-store";
@@ -73,6 +74,8 @@ interface CodeMirrorEditorProps {
   onSearchHighlightApplied?: () => void;
   /** Ref that receives the CM6 internal scroll DOM element for scroll sync. */
   scrollDomRef?: React.MutableRefObject<HTMLElement | null>;
+  /** Called with the span a paste inserted and its text, before the autosave. */
+  onTextPasted?: (from: number, to: number, text: string) => void;
 }
 
 /**
@@ -89,10 +92,12 @@ export default function CodeMirrorEditor({
   searchHighlight,
   onSearchHighlightApplied,
   scrollDomRef,
+  onTextPasted,
 }: CodeMirrorEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView>();
   const onChangeRef = useRef(onChange);
+  const onTextPastedRef = useRef(onTextPasted);
   // Compartment wraps the toggleable extension plugins so they can be swapped
   // live (via dispatch/reconfigure) without tearing down the whole EditorView.
   const extensionCompartment = useRef(new Compartment());
@@ -101,6 +106,9 @@ export default function CodeMirrorEditor({
   useEffect(() => {
     onChangeRef.current = onChange;
   }, [onChange]);
+  useEffect(() => {
+    onTextPastedRef.current = onTextPasted;
+  }, [onTextPasted]);
 
   const createEditor = useCallback(() => {
     if (!containerRef.current) return;
@@ -122,6 +130,19 @@ export default function CodeMirrorEditor({
     const updateListener = EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         onChangeRef.current(update.state.doc.toString());
+        // A paste is checked for credential-shaped lines before the autosave
+        // can write it to disk.
+        for (const tr of update.transactions) {
+          if (!tr.isUserEvent("input.paste")) continue;
+          const range = insertedRange(tr.changes);
+          if (range) {
+            onTextPastedRef.current?.(
+              range.from,
+              range.to,
+              update.state.sliceDoc(range.from, range.to),
+            );
+          }
+        }
       }
     });
 

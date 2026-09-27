@@ -68,7 +68,14 @@ type Section =
   | "automation"
   | "about";
 type UtilityId =
-  "stats" | "health" | "duplicates" | "consolidate" | "tags" | "breach" | "trash";
+  | "stats"
+  | "health"
+  | "duplicates"
+  | "consolidate"
+  | "tags"
+  | "breach"
+  | "trash"
+  | "history";
 
 const UTILITY_ITEMS: { id: UtilityId; label: string }[] = [
   { id: "stats", label: "Vault Statistics" },
@@ -78,6 +85,7 @@ const UTILITY_ITEMS: { id: UtilityId; label: string }[] = [
   { id: "tags", label: "Tag Manager" },
   { id: "breach", label: "Breach Check" },
   { id: "trash", label: "Trash" },
+  { id: "history", label: "Version History" },
 ];
 
 const FONT_FAMILIES = [
