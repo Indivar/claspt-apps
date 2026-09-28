@@ -10,8 +10,12 @@ import type { ApiClient } from "./api-client";
  * Credential cache that resolves domain -> Credential[] lookups.
  *
  * Strategy:
- * 1. Search the API for the domain/hostname
- * 2. Fetch matching pages to get decrypted secret blocks
+ * 1. Ask the vault for every secret block whose label, page title, folder or
+ *    tag names the site (the whole vault, no cap), then full-text search for
+ *    pages whose note text names it. Full-text search alone was the bug: it
+ *    returns a ranked top slice, and in a vault with hundreds of pages that
+ *    mention "google" somewhere, the logins beyond that slice never showed.
+ * 2. Fetch the candidate pages to get decrypted secret blocks
  * 3. Parse secret blocks into structured credentials
  * 4. Score and sort by relevance to the requesting URL
  */
@@ -19,6 +23,8 @@ export class CredentialCache {
   /** In-memory cache: domain -> credentials (cleared on vault lock) */
   private cache = new Map<string, { credentials: Credential[]; timestamp: number }>();
   private readonly TTL_MS = 60_000; // 1 minute cache
+  /** The most pages read for one site or one query: a bound, not a target. */
+  private static readonly MAX_CANDIDATE_PAGES = 400;
 
   constructor(private api: ApiClient) {}
 
@@ -49,11 +55,46 @@ export class CredentialCache {
 
   /** Search credentials by arbitrary query */
   async searchCredentials(query: string): Promise<Credential[]> {
-    const results = await this.api.search(query, "secrets");
-    return this.resolveSearchResults(results);
+    return this.resolveSearchResults(await this.candidatePages([query]));
   }
 
-  private async fetchCredentials(tabUrl: string, hostname: string): Promise<Credential[]> {
+  /**
+   * The pages worth reading for these queries: first every block the vault
+   * lists under a matching label, title, folder or tag, then the full-text
+   * hits. Labels first, so the bound never cuts a login whose label names
+   * the site.
+   */
+  private async candidatePages(queries: Iterable<string>): Promise<SearchResult[]> {
+    const seen = new Set<string>();
+    const out: SearchResult[] = [];
+    const add = (path: string, title: string) => {
+      if (seen.has(path)) return;
+      seen.add(path);
+      out.push({ path, title, snippet: "", score: 0 });
+    };
+    const list = Array.from(queries);
+    for (const query of list) {
+      try {
+        for (const found of await this.api.findSecrets(query))
+          add(found.page_path, found.page_title);
+      } catch {
+        /* the desktop may be locked or away; the search below still runs */
+      }
+    }
+    for (const query of list) {
+      try {
+        for (const r of await this.api.search(query, "secrets")) add(r.path, r.title);
+      } catch {
+        /* ignore */
+      }
+    }
+    return out.slice(0, CredentialCache.MAX_CANDIDATE_PAGES);
+  }
+
+  private async fetchCredentials(
+    tabUrl: string,
+    hostname: string,
+  ): Promise<Credential[]> {
     // Search with multiple queries to maximize matches.
     // For "insurance.ami.co.nz" we search:
     //   1. "insurance.ami.co.nz" (full hostname)
@@ -73,36 +114,35 @@ export class CredentialCache {
     const base = parts.length > 2 ? parts[1] : parts[0];
     if (base) queries.add(base);
 
-    const seen = new Set<string>();
-    const allResults: import("@/shared/types").SearchResult[] = [];
-
-    for (const query of queries) {
-      try {
-        const results = await this.api.search(query, "secrets");
-        for (const r of results) {
-          if (!seen.has(r.path)) { seen.add(r.path); allResults.push(r); }
-        }
-      } catch { /* ignore */ }
-    }
-
-    const credentials = await this.resolveSearchResults(allResults);
+    const credentials = await this.resolveSearchResults(
+      await this.candidatePages(queries),
+    );
 
     // Score, sort by relevance, and attach scores for filter tiers.
     // Honors per-credential url_match policy when set in the secret block:
     //   url_match: never|exact|host|base_domain
-    const policyOf = (cred: Credential): "base_domain" | "host" | "exact" | "never" | undefined => {
-      const raw = (cred.fields["url_match"] || cred.fields["url match"] || "").toLowerCase().trim();
-      if (raw === "never" || raw === "exact" || raw === "host" || raw === "base_domain") return raw;
+    const policyOf = (
+      cred: Credential,
+    ): "base_domain" | "host" | "exact" | "never" | undefined => {
+      const raw = (cred.fields["url_match"] || cred.fields["url match"] || "")
+        .toLowerCase()
+        .trim();
+      if (raw === "never" || raw === "exact" || raw === "host" || raw === "base_domain")
+        return raw;
       return undefined;
     };
     return credentials
       .map((cred) => ({
         ...cred,
-        score: scoreCredentialMatch(tabUrl, {
-          url: cred.url,
-          label: cred.label,
-          pageTitle: cred.pageTitle,
-        }, policyOf(cred)),
+        score: scoreCredentialMatch(
+          tabUrl,
+          {
+            url: cred.url,
+            label: cred.label,
+            pageTitle: cred.pageTitle,
+          },
+          policyOf(cred),
+        ),
       }))
       .filter(({ score }) => score > 0)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));

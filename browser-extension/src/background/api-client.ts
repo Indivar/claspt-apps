@@ -19,7 +19,10 @@ import type {
   SecretBlock,
   SecretBlockDelete,
   SecretBlockPatch,
-  SecretBlockRename, LoginJob } from "@/shared/types";
+  SecretBlockRename,
+  LoginJob,
+  FoundSecret,
+} from "@/shared/types";
 
 /**
  * HTTP client for the Claspt local API (127.0.0.1).
@@ -126,23 +129,40 @@ export class ApiClient {
 
   // ── Search ────────────────────────────────────────────
 
-  async search(query: string, scope: "all" | "secrets" = "secrets"): Promise<SearchResult[]> {
+  async search(
+    query: string,
+    scope: "all" | "secrets" = "secrets",
+  ): Promise<SearchResult[]> {
     const params = new URLSearchParams({ q: query, scope });
     const { data } = await this.request<unknown>(`/api/search?${params}`);
     return unwrapList<SearchResult>(data);
+  }
+
+  /**
+   * Every secret block whose label, page title, folder or a tag contains `q`,
+   * across the whole vault, with no cap. Metadata only; values stay sealed.
+   */
+  async findSecrets(q: string): Promise<FoundSecret[]> {
+    const params = new URLSearchParams({ q });
+    const { data } = await this.request<unknown>(`/api/secrets?${params}`);
+    return unwrapList<FoundSecret>(data);
   }
 
   // ── Pages ─────────────────────────────────────────────
 
   /** Get a single page with decrypted secrets. Accepts ID or path. */
   async getPage(pathOrId: string): Promise<Page> {
-    const { data } = await this.request<Page>(`/api/pages/${encodeURIComponent(pathOrId)}`);
+    const { data } = await this.request<Page>(
+      `/api/pages/${encodeURIComponent(pathOrId)}`,
+    );
     return data;
   }
 
   /** Get a page along with its ETag — for callers that need optimistic concurrency. */
   async getPageWithEtag(pathOrId: string): Promise<{ page: Page; etag: string | null }> {
-    const { data, etag } = await this.request<Page>(`/api/pages/${encodeURIComponent(pathOrId)}`);
+    const { data, etag } = await this.request<Page>(
+      `/api/pages/${encodeURIComponent(pathOrId)}`,
+    );
     return { page: data, etag };
   }
 
@@ -168,12 +188,19 @@ export class ApiClient {
   }
 
   /** Replace a page's full content (destructive — prefer patchSecretBlock for credential edits). */
-  async updatePage(pathOrId: string, body: { content: string }, ifMatch?: string): Promise<Page> {
-    const { data } = await this.request<Page>(`/api/pages/${encodeURIComponent(pathOrId)}`, {
-      method: "PUT",
-      body: JSON.stringify(body),
-      ifMatch,
-    });
+  async updatePage(
+    pathOrId: string,
+    body: { content: string },
+    ifMatch?: string,
+  ): Promise<Page> {
+    const { data } = await this.request<Page>(
+      `/api/pages/${encodeURIComponent(pathOrId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+        ifMatch,
+      },
+    );
     return data;
   }
 
@@ -293,7 +320,10 @@ export class ApiClient {
     return data;
   }
 
-  async renameFolder(name: string, newName: string): Promise<{ old_name: string; new_name: string }> {
+  async renameFolder(
+    name: string,
+    newName: string,
+  ): Promise<{ old_name: string; new_name: string }> {
     const { data } = await this.request<{ old_name: string; new_name: string }>(
       `/api/folders/${encodeURIComponent(name)}`,
       { method: "PATCH", body: JSON.stringify({ new_name: newName }) },
@@ -301,7 +331,11 @@ export class ApiClient {
     return data;
   }
 
-  async deleteFolder(name: string, action: "move" | "delete" = "move", moveTo?: string): Promise<void> {
+  async deleteFolder(
+    name: string,
+    action: "move" | "delete" = "move",
+    moveTo?: string,
+  ): Promise<void> {
     const params = new URLSearchParams({ action });
     if (moveTo) params.set("move_to", moveTo);
     await this.request<void>(`/api/folders/${encodeURIComponent(name)}?${params}`, {
@@ -328,7 +362,10 @@ export class ApiClient {
 
   // ── Passkeys ──────────────────────────────────────────
 
-  async passkeyRegister(rpId: string, body: PasskeyCreateRequest): Promise<RegistrationResult> {
+  async passkeyRegister(
+    rpId: string,
+    body: PasskeyCreateRequest,
+  ): Promise<RegistrationResult> {
     const { data } = await this.request<RegistrationResult>(
       `/api/passkeys/${encodeURIComponent(rpId)}/register`,
       { method: "POST", body: JSON.stringify(body) },
@@ -336,7 +373,10 @@ export class ApiClient {
     return data;
   }
 
-  async passkeyAuthenticate(rpId: string, body: PasskeyGetRequest): Promise<AssertionResult> {
+  async passkeyAuthenticate(
+    rpId: string,
+    body: PasskeyGetRequest,
+  ): Promise<AssertionResult> {
     const { data } = await this.request<AssertionResult>(
       `/api/passkeys/${encodeURIComponent(rpId)}/authenticate`,
       { method: "POST", body: JSON.stringify(body) },
@@ -412,7 +452,11 @@ export class ApiError extends Error {
   }
 }
 
-async function parseError(status: number, body: string, etag: string | null): Promise<ApiError> {
+async function parseError(
+  status: number,
+  body: string,
+  etag: string | null,
+): Promise<ApiError> {
   // Try the v2.0.0 JSON envelope first.
   try {
     const parsed = JSON.parse(body) as ApiErrorEnvelope;
@@ -434,13 +478,20 @@ async function parseError(status: number, body: string, etag: string | null): Pr
 
 function codeFromStatus(status: number): ApiErrorCode {
   switch (status) {
-    case 400: return "BAD_REQUEST";
-    case 401: return "UNAUTHORIZED";
-    case 403: return "VAULT_LOCKED";
-    case 404: return "NOT_FOUND";
-    case 412: return "PRECONDITION_FAILED";
-    case 503: return "NOT_READY";
-    default: return "INTERNAL_ERROR";
+    case 400:
+      return "BAD_REQUEST";
+    case 401:
+      return "UNAUTHORIZED";
+    case 403:
+      return "VAULT_LOCKED";
+    case 404:
+      return "NOT_FOUND";
+    case 412:
+      return "PRECONDITION_FAILED";
+    case 503:
+      return "NOT_READY";
+    default:
+      return "INTERNAL_ERROR";
   }
 }
 

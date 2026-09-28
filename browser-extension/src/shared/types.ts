@@ -172,12 +172,7 @@ export interface CapturedItem {
 
 /** What happened to the last submission on a site. */
 export type CaptureOutcome =
-  | "captured"
-  | "parked"
-  | "already_saved"
-  | "never_save"
-  | "excluded"
-  | "failed";
+  "captured" | "parked" | "already_saved" | "never_save" | "excluded" | "failed";
 
 export interface LastCapture {
   outcome: CaptureOutcome;
@@ -187,6 +182,18 @@ export interface LastCapture {
 }
 
 /** Search result from /api/search */
+/** One secret block, as the vault lists them by label: metadata only, never a value. */
+export interface FoundSecret {
+  label: string;
+  page_title: string;
+  page_path: string;
+  folder: string;
+  tags: string[];
+  created_at: string;
+  reference_prefix: string;
+  encrypted?: boolean;
+}
+
 export interface SearchResult {
   path: string;
   title: string;
@@ -459,7 +466,13 @@ export type Message =
    * lose it. Confirm keeps it as an ordinary login; discard sends it to the
    * trash. From a page, only the site the browser says the message came from.
    */
-  | { type: "CAPTURE_LOGIN"; username: string; password: string; url: string; isSignup: boolean }
+  | {
+      type: "CAPTURE_LOGIN";
+      username: string;
+      password: string;
+      url: string;
+      isSignup: boolean;
+    }
   | {
       type: "CAPTURE_RESULT";
       success: boolean;
